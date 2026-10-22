@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "repoGuide": {
+      "command": "repo-guide-mcp",
+      "args": ["--repo", "/ABSOLUTE/PATH/TO/REPOSITORY"]
+    }
+  }
+}

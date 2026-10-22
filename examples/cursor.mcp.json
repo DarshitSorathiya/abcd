@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "repoGuide": {
+      "type": "stdio",
+      "command": "repo-guide-mcp",
+      "args": ["--repo", "${workspaceFolder}"]
+    }
+  }
+}

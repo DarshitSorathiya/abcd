@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "repo-guide"
+description = "A local, read-only repository onboarding assistant."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dynamic = ["version"]
+dependencies = ["jsonschema==4.26.0", "mcp==2.3.0", "requests==2.34.2"]
+
+[project.scripts]
+repo-guide-mcp = "repo_guide.server:main"
+repo-guide = "repo_guide.agent:main"
+
+[project.optional-dependencies]
+dev = [
+    "pyright==1.1.407",
+    "pytest==8.4.2",
+    "ruff==0.14.3",
+]
+
+[tool.hatch.version]
+path = "src/repo_guide/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/repo_guide"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "AGENTS.md",
+    "README.md",
+    "docs/**",
+    "pyproject.toml",
+    "src/**",
+    "tests/**",
+    "uv.lock",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+include = ["src"]
