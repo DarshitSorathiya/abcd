@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "repo-guide"
 description = "A local, read-only repository onboarding assistant."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 dynamic = ["version"]
 dependencies = ["jsonschema==4.26.0", "mcp==2.3.0", "requests==2.34.2"]

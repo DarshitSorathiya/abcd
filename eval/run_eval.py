@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -252,7 +252,7 @@ def main() -> int:
         "model": settings.model,
         "application_version": __version__,
         "fixture_head": head,
-        "date_utc": datetime.now(UTC).isoformat(),
+        "date_utc": datetime.now(timezone.utc).isoformat(),
         "ollama_version": _ollama_version(),
     }
     result = {"metrics": metrics, "questions": records}

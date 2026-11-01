@@ -6,7 +6,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import Enum
 from pathlib import Path
 from typing import Mapping
 
@@ -23,14 +23,14 @@ _GIT_ENV = {
 }
 
 
-class RootMode(StrEnum):
+class RootMode(str, Enum):
     """Available modes for repository operations."""
 
     GIT = "git"
     REDUCED = "reduced"
 
 
-class Capability(StrEnum):
+class Capability(str, Enum):
     """Operation classes gated by the resolved root mode."""
 
     FILESYSTEM = "filesystem"
