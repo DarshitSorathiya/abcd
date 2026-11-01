@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Protocol, cast
+from typing import Any, Callable, Protocol, cast
 from urllib.parse import urlsplit
 
 import requests
@@ -185,8 +185,10 @@ def list_issues(
                     url,
                     params=params,
                     headers=headers,
-                    timeout=(min(_CONNECT_TIMEOUT_SECONDS, context.limits.max_http_timeout_seconds),
-                             context.limits.max_http_timeout_seconds),
+                    timeout=(
+                        min(_CONNECT_TIMEOUT_SECONDS, context.limits.max_http_timeout_seconds),
+                        context.limits.max_http_timeout_seconds,
+                    ),
                     allow_redirects=False,
                     verify=True,
                     stream=True,
@@ -349,6 +351,46 @@ def _parse_issues(payload: list[Any], remote: GitHubRemote, limit: int) -> list[
         if len(issues) >= limit:
             break
     return issues
+
+
+def _retry_with_backoff(
+    operation: Callable[[], Any],
+    *,
+    retries: int,
+    sleep: Any,
+    random_value: Any,
+    on_retry: Callable[[int, Exception], None] | None = None,
+) -> Any:
+    """Execute operation with bounded retry logic (Fix #12).
+
+    Extracts common retry pattern used across HTTP requests.
+
+    Args:
+        operation: Callable to execute.
+        retries: Maximum number of retry attempts.
+        sleep: Sleep function.
+        random_value: Random value generator.
+        on_retry: Optional callback called before each retry.
+
+    Returns:
+        The result of the operation.
+
+    Raises:
+        The last exception if all retries are exhausted.
+    """
+    last_exception: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            return operation()
+        except Exception as exc:
+            last_exception = exc
+            if attempt < retries:
+                if on_retry is not None:
+                    on_retry(attempt, exc)
+                _sleep_backoff(attempt, sleep, random_value)
+    if last_exception is not None:
+        raise last_exception
+    raise RuntimeError("retry loop exhausted without exception")
 
 
 def _parse_remaining(headers: Any) -> int | None:

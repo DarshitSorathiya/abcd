@@ -60,7 +60,10 @@ def test_list_tree_returns_sorted_safe_entries_and_omits_generated_and_denied(
     (repository.path / "node_modules").mkdir()
     (repository.path / "node_modules" / "ignored.js").write_text("x", encoding="utf-8")
     (repository.path / "image.png").write_bytes(b"\x89PNG\x00")
-    (repository.path / "link-out").symlink_to(repository.path.parent, target_is_directory=True)
+    try:
+        (repository.path / "link-out").symlink_to(repository.path.parent, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
 
     result = gitops.list_tree(repository, depth=3)
     names = [entry.path for entry in result.entries]

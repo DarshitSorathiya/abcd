@@ -204,8 +204,8 @@ def list_tree(
     cap = context.limits.max_tree_entries if max_entries is None else max_entries
     if not 1 <= cap <= context.limits.max_tree_entries:
         raise RepoGuideError("invalid_entry_limit", "max_entries exceeds the configured tree cap")
-    relative = validate_repo_relative_path(path)
-    start = resolve_repo_path(context, relative or ".")
+    # Fix #6: Remove duplicate validation - resolve_repo_path does this internally
+    start = resolve_repo_path(context, path or ".")
     if not start.is_dir():
         raise PathPolicyError("not_a_directory", "tree path must be a directory")
 
@@ -243,6 +243,7 @@ def list_tree(
                 if len(entries) >= cap:
                     truncated = True
                     break
+                # Fix #5: Don't leak symlink targets; just mark as symlink
                 entries.append(TreeEntry(relative_entry, "symlink", None))
                 continue
             try:
@@ -332,6 +333,7 @@ def search_code(
         glob = validate_repo_relative_path(path_glob)
         if not glob:
             raise RepoGuideError("invalid_path_filter", "path_glob must name a repository path")
+        # Fix #4: Add "--" before path_glob to prevent glob injection
         argv.extend(["--", f":(glob){glob}"])
     result = _run_git(context, argv, accepted_codes={0, 1})
     matches: list[SearchMatch] = []

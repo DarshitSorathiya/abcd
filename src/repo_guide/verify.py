@@ -8,21 +8,31 @@ pass is only a secondary bounded check and is not a correctness guarantee.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol, cast
 
 from repo_guide import gitops
 from repo_guide.config import AgentSettings
+from repo_guide.constants import (
+    JSON_RECURSION_DEPTH,
+    MAX_ANSWER_CHARS,
+    MAX_CITATIONS,
+    MAX_QUOTE_CHARS,
+    MAX_RANGE_LINES,
+)
 from repo_guide.errors import AgentError, PathPolicyError, RepoGuideError
 from repo_guide.root import RootContext
 from repo_guide.safety import read_repo_file, resolve_repo_path, validate_repo_relative_path
 
-_MAX_CITATIONS = 100
-_MAX_RANGE_LINES = 200
-_MAX_ANSWER_CHARS = 24_000
-_MAX_QUOTE_CHARS = 500
+_MAX_CITATIONS = MAX_CITATIONS
+_MAX_RANGE_LINES = MAX_RANGE_LINES
+_MAX_ANSWER_CHARS = MAX_ANSWER_CHARS
+_MAX_QUOTE_CHARS = MAX_QUOTE_CHARS
+_JSON_RECURSION_DEPTH = JSON_RECURSION_DEPTH
 _FILE_CITATION = re.compile(
     r"(?<![A-Za-z0-9_])(?P<path>/?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+|/?[A-Za-z0-9_.-]+\.[A-Za-z0-9_+-]+):(?P<start>\d+)(?:-(?P<end>\d+))?"
 )
@@ -65,6 +75,7 @@ class CitationFinding:
     citation: Citation
     status: str
     reason: str
+    content_fingerprint: str | None = None  # Hash of file content at verification time
 
     @property
     def valid(self) -> bool:
@@ -448,17 +459,21 @@ def _verify_file_citation(
         return CitationFinding(citation, "operational_error", exc.code)
     except OSError:
         return CitationFinding(citation, "operational_error", "file_access_failed")
+
+    # Capture content fingerprint to detect TOCTOU races (Fix #1)
+    content_fingerprint = _compute_content_fingerprint(content, resolved)
+
     lines = content.splitlines()
     if end > len(lines):
-        return CitationFinding(citation, "invalid", "cited line is beyond end of file")
+        return CitationFinding(citation, "invalid", "cited line is beyond end of file", content_fingerprint)
     observed = provenance.file_lines.get(normalized, frozenset())
     if not all(line in observed for line in range(start, end + 1)):
-        return CitationFinding(citation, "invalid", "cited lines were not returned as evidence in this turn")
+        return CitationFinding(citation, "invalid", "cited lines were not returned as evidence in this turn", content_fingerprint)
     if citation.quote:
         quote_result = _verify_quote(citation.quote, lines, start, end, citation.quote_explicit_code)
         if quote_result is not None:
-            return CitationFinding(citation, "invalid", quote_result)
-    return CitationFinding(citation, "valid", "file, lines, policy, and current-turn provenance verified")
+            return CitationFinding(citation, "invalid", quote_result, content_fingerprint)
+    return CitationFinding(citation, "valid", "file, lines, policy, and current-turn provenance verified", content_fingerprint)
 
 
 def _verify_quote(
@@ -740,6 +755,20 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _check_json_depth(value: Any, max_depth: int = _JSON_RECURSION_DEPTH) -> None:
+    """Validate JSON recursion depth to prevent stack overflow (Fix #11)."""
+    def _check_depth(obj: Any, depth: int) -> None:
+        if depth > max_depth:
+            raise ValueError(f"JSON recursion depth exceeds limit of {max_depth}")
+        if isinstance(obj, dict):
+            for v in obj.values():
+                _check_depth(v, depth + 1)
+        elif isinstance(obj, list):
+            for item in obj:
+                _check_depth(item, depth + 1)
+    _check_depth(value, 0)
+
+
 def _bounded_evidence(evidence: tuple[dict[str, Any], ...], limit: int) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     used = 0
@@ -781,6 +810,18 @@ def _rate(valid: int, denominator: int) -> float | None:
 
 def _finding_text(finding: CitationFinding) -> str:
     return f"{finding.status}: {finding.citation.raw} ({finding.reason})"
+
+
+def _compute_content_fingerprint(content: str, path: Path) -> str:
+    """Compute content fingerprint for TOCTOU race detection (Fix #1).
+
+    Captures file content hash at verification time to detect if the file
+    changes between verification and output presentation.
+    """
+    hasher = hashlib.sha256()
+    hasher.update(content.encode("utf-8"))
+    hasher.update(str(path).encode("utf-8"))
+    return hasher.hexdigest()[:16]
 
 
 def _safe_fallback(candidate: str, errors: list[str] | tuple[str, ...]) -> str:

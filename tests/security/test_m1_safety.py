@@ -45,7 +45,7 @@ def test_relative_absolute_windows_and_normalized_traversal_are_rejected(
 def test_paths_with_spaces_and_unicode_are_confined_and_readable(root_context: RootContext) -> None:
     file_path = root_context.path / "目录 with spaces" / "résumé.txt"
     file_path.parent.mkdir()
-    file_path.write_text("safe text\n", encoding="utf-8")
+    file_path.write_text("safe text\n", encoding="utf-8", newline="")
 
     assert read_repo_file(root_context, "目录 with spaces/résumé.txt") == "safe text\n"
 
@@ -198,3 +198,19 @@ def test_structured_errors_do_not_include_secret_contents(root_context: RootCont
 def test_safety_limits_reject_nonpositive_values(parameters: dict[str, int]) -> None:
     with pytest.raises(ConfigurationError):
         SafetyLimits(**parameters)  # type: ignore[arg-type]
+
+
+# Fix #9: Concurrent isolation - multiple clients with different roots
+def test_multiple_clients_different_roots_are_isolated(tmp_path: Path) -> None:
+    root_a = tmp_path / "repo_a"
+    root_b = tmp_path / "repo_b"
+    root_a.mkdir()
+    root_b.mkdir()
+    (root_a / "file.txt").write_text("a", encoding="utf-8")
+    (root_b / "file.txt").write_text("b", encoding="utf-8")
+    from repo_guide.root import RootContext, RootMode
+    ctx_a = RootContext(root_a.resolve(), RootMode.GIT)
+    ctx_b = RootContext(root_b.resolve(), RootMode.GIT)
+    from repo_guide.safety import read_repo_file
+    assert read_repo_file(ctx_a, "file.txt") == "a"
+    assert read_repo_file(ctx_b, "file.txt") == "b"

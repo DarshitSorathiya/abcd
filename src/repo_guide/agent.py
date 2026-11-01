@@ -114,7 +114,8 @@ async def run_agent_turn(
 
     catalogue = tools if tools is not None else await discover_tools(client, settings)
     catalogue_text = _serialize_catalogue(catalogue, settings.max_context_chars // 2)
-    ledger = EvidenceLedger(settings)
+    # Fix #7: Pass max_errors as int instead of full settings object
+    ledger = EvidenceLedger(max_errors=16)
     system_message = {"role": "system", "content": _SYSTEM_PROMPT}
     last_call_generation: dict[str, int] = {}
     correction_attempts: set[str] = set()
@@ -179,7 +180,7 @@ async def run_agent_turn(
             )
         except asyncio.CancelledError:
             raise
-        except TimeoutError:
+        except asyncio.TimeoutError:
             ledger.record(
                 tool.name,
                 arguments,

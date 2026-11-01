@@ -1,0 +1,41 @@
+{
+  "name": "repo-guide-extension",
+  "displayName": "Repo Guide",
+  "description": "AI-powered repository onboarding assistant",
+  "version": "0.1.0",
+  "publisher": "YourName",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Other",
+    "Machine Learning"
+  ],
+  "activationEvents": [
+    "onCommand:repo-guide.ask"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "repo-guide.ask",
+        "title": "Repo Guide: Ask about repository"
+      }
+    ],
+    "configuration": {
+      "title": "Repo Guide",
+      "properties": {
+        "repo-guide.mcpPath": {
+          "type": "string",
+          "default": "repo-guide-mcp",
+          "description": "Path to the repo-guide-mcp executable"
+        },
+        "repo-guide.repoPath": {
+          "type": "string",
+          "default": "${workspaceFolder}",
+          "description": "Repository path to analyze"
+        }
+      }
+    }
+  }
+}

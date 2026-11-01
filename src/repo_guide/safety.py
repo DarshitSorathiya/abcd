@@ -144,14 +144,14 @@ def _validate_relative_path(value: str) -> tuple[str, ...]:
         Path(normalized).is_absolute()
         or windows.is_absolute()
         or windows.drive
-        or normalized.startswith(("//", "\\\\"))
+        or normalized.startswith(("//", "\\\\", "/"))
     ):
         raise PathPolicyError("absolute_path", "absolute paths are not allowed")
 
     tokens = normalized.replace("\\", "/").split("/")
     if any(part == ".." for part in tokens):
         raise PathPolicyError("path_traversal", "parent-directory traversal is not allowed")
-    parts = tuple(part for part in value.split("/") if part not in ("", "."))
+    parts = tuple(part for part in normalized.split("/") if part not in ("", "."))
     if any(part in ("..", "") for part in parts):
         raise PathPolicyError("path_traversal", "parent-directory traversal is not allowed")
     return parts
@@ -199,21 +199,32 @@ def _contains_secret_pattern(text: str) -> bool:
 
 
 def _open_readonly_beneath(root: Path, path: Path) -> BinaryIO:
-    """Open without following any path component on platforms with dir-fd support."""
+    """Open without following any path component using dir_fd (Fix #3, #8).
+
+    Uses os.open with dir_fd on platforms that support it for atomic
+    symlink-safe traversal. Raises on platforms without dir_fd support.
+    """
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     directory_flag = getattr(os, "O_DIRECTORY", 0)
-    if directory_flag and os.open in os.supports_dir_fd:
-        descriptor = os.open(root, flags | directory_flag)
+
+    descriptor = os.open(str(root), flags | directory_flag)
+    # Note: descriptor is not explicitly closed here; os.fdopen manages it
+    parts = path.relative_to(root).parts
+    if not parts:
+        return os.fdopen(descriptor, "rb")
+    current = descriptor
+    try:
+        for part in parts[:-1]:
+            child = os.open(str(part), flags | directory_flag, dir_fd=current)
+            os.close(current)
+            current = child
+        file_descriptor = os.open(str(parts[-1]), flags, dir_fd=current)
+        # Close the directory descriptor after opening the file
+        os.close(current)
+        return os.fdopen(file_descriptor, "rb")
+    except:
         try:
-            parts = path.relative_to(root).parts
-            if not parts:
-                return os.fdopen(descriptor, "rb")
-            for part in parts[:-1]:
-                child = os.open(part, flags | directory_flag, dir_fd=descriptor)
-                os.close(descriptor)
-                descriptor = child
-            file_descriptor = os.open(parts[-1], flags, dir_fd=descriptor)
-            return os.fdopen(file_descriptor, "rb")
-        finally:
-            os.close(descriptor)
-    return os.fdopen(os.open(path, flags), "rb")
+            os.close(current)
+        except OSError:
+            pass
+        raise

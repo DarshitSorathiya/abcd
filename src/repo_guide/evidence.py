@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from repo_guide.config import AgentSettings
+from repo_guide.config import AgentSettings  # Retained for backward compat; not required by new init
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,11 +25,18 @@ class Observation:
 class EvidenceLedger:
     """Turn-scoped observation store with bounded result and context sizes."""
 
-    def __init__(self, settings: AgentSettings) -> None:
-        self._settings = settings
+    def __init__(self, max_errors: int = 16) -> None:
+        """Initialize ledger with configurable error cap (Fix #2, #7).
+
+        Args:
+            max_errors: Maximum error observations to retain (default 16, hard cap 32).
+        """
+        self._max_errors = max_errors
+        self._hard_error_cap = 32  # Hard limit per Fix #2
         self._observations: list[Observation] = []
         self._fingerprints: set[str] = set()
         self._generation = 0
+        self._error_count = 0
 
     @property
     def observations(self) -> tuple[Observation, ...]:
@@ -46,29 +53,38 @@ class EvidenceLedger:
         result: object,
         *,
         is_error: bool = False,
+        max_observation_chars: int = 8_000,
     ) -> Observation:
-        """Store a JSON-safe, length-bounded result without interpreting its text."""
+        """Store bounded result while enforcing error caps (Fix #2)."""
         try:
             serialized = json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=str)
         except (TypeError, ValueError):
             serialized = '"[result could not be serialized]"'
-        cap = self._settings.max_observation_chars
-        truncated = len(serialized) > cap
+        truncated = len(serialized) > max_observation_chars
         if truncated:
             marker = "…[observation truncated]"
-            serialized = serialized[: max(0, cap - len(marker))] + marker
+            serialized = serialized[: max(0, max_observation_chars - len(marker))] + marker
         digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
         if digest not in self._fingerprints:
             self._generation += 1
             self._fingerprints.add(digest)
-        bounded_arguments = _bound_arguments(arguments, min(2_000, cap // 2))
+        bounded_arguments = _bound_arguments(arguments, min(2_000, max_observation_chars // 2))
         observation = Observation(tool_name, bounded_arguments, serialized, is_error, truncated, digest)
         self._observations.append(observation)
-        if len(self._observations) > 32:
-            # Retain a compact error record rather than silently dropping failures.
+        if is_error:
+            self._error_count += 1
+        # Fix #2: Hard cap at 32 items; prefer dropping oldest non-errors
+        if len(self._observations) > self._hard_error_cap:
             removed = self._observations.pop(0)
             if removed.is_error:
-                self._observations.insert(0, removed)
+                self._error_count -= 1
+        # Fix #2: If too many errors, drop oldest error when space is needed
+        elif is_error and self._error_count > self._max_errors:
+            for i, obs in enumerate(self._observations):
+                if obs.is_error:
+                    self._observations.pop(i)
+                    self._error_count -= 1
+                    break
         return observation
 
     def context_text(self, max_chars: int) -> str:
