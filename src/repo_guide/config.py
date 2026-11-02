@@ -9,6 +9,7 @@ from repo_guide.errors import ConfigurationError
 DEFAULT_OLLAMA_MODEL = "qwen3:8b"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 DEFAULT_GROQ_MODEL = "qwen/qwen3.8-27b"
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,13 +20,13 @@ class AgentSettings:
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
     allow_remote_ollama: bool = False
     connect_timeout_seconds: float = 5.0
-    read_timeout_seconds: float = 120.0
+    read_timeout_seconds: float = 180.0
     max_request_bytes: int = 256_000
     max_response_bytes: int = 256_000
     max_output_tokens: int = 1_024
     max_observation_chars: int = 8_000
     max_context_chars: int = 24_000
-    max_steps: int = 4
+    max_steps: int = 2
     tool_timeout_seconds: float = 30.0
     max_tools: int = 64
 

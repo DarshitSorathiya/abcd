@@ -16,9 +16,10 @@ import requests
 
 import repo_guide.agent as agent_module
 import repo_guide.ollama_client as ollama_module
-from repo_guide.config import DEFAULT_GROQ_MODEL, AgentSettings
+from repo_guide.config import DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_MODEL, AgentSettings
 from repo_guide.errors import AgentError
 from repo_guide.evidence import EvidenceLedger
+from repo_guide.gemini_client import GeminiClient
 from repo_guide.groq_client import GroqClient
 from repo_guide.ollama_client import OllamaClient
 from repo_guide.root import RootContext, RootMode, resolve_root
@@ -63,6 +64,15 @@ class FakeHttpSession:
 
     def close(self) -> None:
         self.closed = True
+
+
+def gemini_stream_response(*payloads: dict[str, Any]) -> FakeResponse:
+    raw = b"".join(
+        b"data: " + json.dumps(payload, separators=(",", ":")).encode() + b"\n\n"
+        for payload in payloads
+    )
+    chunks = [raw[index : index + 7] for index in range(0, len(raw), 7)]
+    return FakeResponse(raw=raw, chunks=chunks)
 
 
 class FakeOllama:
@@ -180,6 +190,149 @@ def test_groq_client_posts_bounded_json_chat_to_hosted_api() -> None:
     assert session.closed is False
 
 
+def test_gemini_client_posts_bounded_json_chat_to_google_api() -> None:
+    response_text = '{"action":"final","answer":"ok"}'
+    response = gemini_stream_response(
+        {"candidates": [{"content": {"parts": [{"text": '{"action":"final",'}]}}]},
+        {"candidates": [{"content": {"parts": [{"text": '"answer":"ok"}'}]}}]},
+    )
+    session = FakeHttpSession([response])
+    settings = fake_settings(model=DEFAULT_GEMINI_MODEL)
+    callbacks: list[bool] = []
+    client = GeminiClient(
+        settings,
+        "test-gemini-key",
+        session=session,
+        on_response_chunk=lambda: callbacks.append(True),
+    )
+
+    content = client.chat(
+        [
+            {"role": "system", "content": "Return JSON only."},
+            {"role": "user", "content": "Question"},
+        ]
+    )
+
+    url, request = session.calls[0]
+    assert url == (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{DEFAULT_GEMINI_MODEL}:streamGenerateContent"
+    )
+    assert content == response_text
+    assert request["headers"]["x-goog-api-key"] == "test-gemini-key"
+    assert "test-gemini-key" not in url
+    assert request["params"] == {"alt": "sse"}
+    assert request["json"]["systemInstruction"] == {
+        "parts": [{"text": "Return JSON only."}]
+    }
+    assert request["json"]["contents"] == [
+        {"role": "user", "parts": [{"text": "Question"}]}
+    ]
+    assert request["json"]["generationConfig"] == {
+        "maxOutputTokens": settings.max_output_tokens,
+        "responseMimeType": "application/json",
+        "thinkingConfig": {"thinkingLevel": "low"},
+    }
+    assert request["timeout"] == (5.0, 120.0)
+    assert request["allow_redirects"] is False
+    assert request["verify"] is True
+    assert callbacks == [True]
+    assert response.closed
+    client.close()
+    assert session.closed is False
+
+
+def test_gemini_client_maps_assistant_role_and_temperature() -> None:
+    session = FakeHttpSession(
+        [
+            gemini_stream_response(
+                {"candidates": [{"content": {"parts": [{"text": '{"ok":true}'}]}}]}
+            )
+        ]
+    )
+    client = GeminiClient(
+        fake_settings(model=DEFAULT_GEMINI_MODEL), "test-gemini-key", session=session
+    )
+
+    client.chat(
+        [
+            {"role": "user", "content": "Question"},
+            {"role": "assistant", "content": '{"action":"final","answer":"ok"}'},
+            {"role": "user", "content": "Continue"},
+        ],
+        temperature=0.0,
+    )
+
+    request = session.calls[0][1]["json"]
+    assert request["contents"] == [
+        {"role": "user", "parts": [{"text": "Question"}]},
+        {"role": "model", "parts": [{"text": '{"action":"final","answer":"ok"}'}]},
+        {"role": "user", "parts": [{"text": "Continue"}]},
+    ]
+    assert request["generationConfig"]["temperature"] == 0.0
+
+
+def test_gemini_client_reports_stream_timeout_safely() -> None:
+    class TimeoutResponse(FakeResponse):
+        def iter_content(self, chunk_size: int) -> Any:
+            del chunk_size
+
+            def chunks() -> Any:
+                yield b'data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}\n\n'
+                raise requests.Timeout("controlled timeout")
+
+            return chunks()
+
+    response = TimeoutResponse()
+    client = GeminiClient(
+        fake_settings(model=DEFAULT_GEMINI_MODEL),
+        "test-gemini-key",
+        session=FakeHttpSession([response]),
+    )
+
+    with pytest.raises(AgentError) as error:
+        client.chat([{"role": "user", "content": "Question"}])
+
+    assert error.value.code == "gemini_timeout"
+    assert response.closed
+
+
+def test_gemini_client_sanitizes_provider_error_and_closes_response() -> None:
+    response_obj = FakeResponse(
+        {"error": {"message": "Bad key test-gemini-key"}},
+        status=400,
+    )
+    client = GeminiClient(
+        fake_settings(model=DEFAULT_GEMINI_MODEL),
+        "test-gemini-key",
+        session=FakeHttpSession([response_obj]),
+    )
+
+    with pytest.raises(AgentError) as error:
+        client.chat([{"role": "user", "content": "Question"}])
+
+    assert error.value.code == "gemini_http_error"
+    assert "Bad key [redacted]" in error.value.message
+    assert "test-gemini-key" not in error.value.message
+    assert response_obj.closed
+
+
+def test_gemini_client_rejects_invalid_model_and_unbounded_request() -> None:
+    with pytest.raises(AgentError, match="Gemini model ID"):
+        GeminiClient(fake_settings(model="../unsafe"), "test-gemini-key", session=FakeHttpSession([]))
+
+    session = FakeHttpSession([])
+    client = GeminiClient(
+        fake_settings(model=DEFAULT_GEMINI_MODEL, max_request_bytes=10),
+        "test-gemini-key",
+        session=session,
+    )
+    with pytest.raises(AgentError) as error:
+        client.chat([{"role": "user", "content": "too large"}])
+    assert error.value.code == "gemini_request_too_large"
+    assert session.calls == []
+
+
 def test_groq_client_sanitizes_http_errors_and_closes_response() -> None:
     response_obj = FakeResponse(status=401, raw=b"private credential detail")
     client = GroqClient(fake_settings(), "test-api-key", session=FakeHttpSession([response_obj]))
@@ -193,8 +346,47 @@ def test_groq_client_sanitizes_http_errors_and_closes_response() -> None:
     assert response_obj.closed
 
 
+def test_groq_client_explains_http_400_and_redacts_api_key() -> None:
+    response_obj = FakeResponse(
+        {"error": {"message": "Invalid parameter for test-api-key.\nCheck request."}},
+        status=400,
+    )
+    client = GroqClient(fake_settings(), "test-api-key", session=FakeHttpSession([response_obj]))
+
+    with pytest.raises(AgentError) as error:
+        client.chat([{"role": "user", "content": "question"}])
+
+    assert error.value.code == "groq_http_error"
+    assert "Invalid parameter for [redacted]. Check request." in error.value.message
+    assert "test-api-key" not in error.value.message
+    assert response_obj.closed
+
+
+def test_groq_client_uses_generic_http_400_message_when_body_is_unusable() -> None:
+    response_obj = FakeResponse(status=400, raw=b"private provider response")
+    client = GroqClient(fake_settings(), "test-api-key", session=FakeHttpSession([response_obj]))
+
+    with pytest.raises(AgentError) as error:
+        client.chat([{"role": "user", "content": "question"}])
+
+    assert error.value.code == "groq_http_error"
+    assert "check the selected model and supported request parameters" in error.value.message
+    assert "private provider response" not in error.value.message
+    assert response_obj.closed
+
+
 def test_groq_client_reports_rate_limit_retry_delay() -> None:
-    response_obj = FakeResponse(status=429, headers={"Retry-After": "17"})
+    response_obj = FakeResponse(
+        {"error": {"message": "Token limit reached for test-api-key"}},
+        status=429,
+        headers={
+            "Retry-After": "17",
+            "x-ratelimit-remaining-requests": "998",
+            "x-ratelimit-reset-requests": "22h",
+            "x-ratelimit-remaining-tokens": "7000",
+            "x-ratelimit-reset-tokens": "4s",
+        },
+    )
     client = GroqClient(fake_settings(), "test-api-key", session=FakeHttpSession([response_obj]))
 
     with pytest.raises(AgentError) as error:
@@ -202,6 +394,10 @@ def test_groq_client_reports_rate_limit_retry_delay() -> None:
 
     assert error.value.code == "groq_rate_limited"
     assert "retry after 17 seconds" in error.value.message
+    assert "Token limit reached for [redacted]" in error.value.message
+    assert "remaining requests (daily)=998" in error.value.message
+    assert "remaining tokens (per minute)=7000" in error.value.message
+    assert "test-api-key" not in error.value.message
     assert response_obj.closed
 
 
@@ -384,8 +580,53 @@ def test_groq_invalid_action_does_not_spend_requests_on_recovery() -> None:
     assert len(groq.messages) == 1
 
 
-def test_default_model_decision_budget_is_four() -> None:
-    assert AgentSettings().max_steps == 4
+def test_gemini_invalid_action_does_not_spend_requests_on_recovery() -> None:
+    class FakeGemini(FakeOllama):
+        provider = "gemini"
+
+    gemini = FakeGemini(["not json"])
+    with pytest.raises(AgentError) as error:
+        asyncio.run(
+            agent_module._request_action(
+                gemini,
+                {"role": "system", "content": agent_module._SYSTEM_PROMPT},
+                "question",
+                fake_settings(),
+            )
+        )
+
+    assert error.value.code == "model_action_unusable"
+    assert "Gemini" in error.value.message
+    assert len(gemini.messages) == 1
+
+
+def test_gemini_verbose_request_reports_wait_and_completion(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeGemini(FakeOllama):
+        provider = "gemini"
+
+    gemini = FakeGemini([response("final", answer="ok")])
+    action = asyncio.run(
+        agent_module._request_action(
+            gemini,
+            {"role": "system", "content": agent_module._SYSTEM_PROMPT},
+            "question",
+            fake_settings(),
+            verbose=True,
+            decision=2,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert action.answer == "ok"
+    assert "gemini request 2 started" in captured.err
+    assert "read timeout is 120s between chunks" in captured.err
+    assert "gemini request 2 finished after" in captured.err
+
+
+def test_default_model_decision_budget_is_two() -> None:
+    assert AgentSettings().max_steps == 2
 
 
 def test_dynamic_tool_discovery_supports_pagination() -> None:
@@ -528,7 +769,9 @@ def test_schema_invalid_arguments_do_not_reach_server_and_root_cannot_be_changed
     client.call_tool = _tool_calls_with_results([result_payload], client.calls)
 
     result = asyncio.run(
-        agent_module.run_agent_turn(client, ollama, "Read the README", settings=fake_settings())
+        agent_module.run_agent_turn(
+            client, ollama, "Read the README", settings=fake_settings(max_steps=4)
+        )
     )
 
     assert client.calls == [("read_file", {"path": "README.md"})]
@@ -639,9 +882,9 @@ def test_tool_timeout_is_recorded_without_internal_exception_text() -> None:
     assert "tool_timeout" in result.evidence[0]["result"]
 
 
-def test_server_parameters_pin_root_and_use_current_python_module() -> None:
+def test_server_parameters_pin_root_use_current_python_and_forward_verbose() -> None:
     context = RootContext(Path("/tmp/root with space").resolve(), RootMode.REDUCED)
-    parameters = agent_module.build_server_parameters(context)
+    parameters = agent_module.build_server_parameters(context, verbose=True)
 
     assert parameters.command == sys.executable
     assert parameters.args == [
@@ -650,6 +893,7 @@ def test_server_parameters_pin_root_and_use_current_python_module() -> None:
         "--repo",
         str(context.path),
         "--allow-non-git",
+        "--verbose",
     ]
     assert "root" not in parameters.args
 
@@ -681,6 +925,7 @@ def test_cli_interactive_empty_input_eof_stdout_and_stderr_separation(
     monkeypatch.setattr(agent_module, "OllamaClient", lambda settings: fake_ollama)
     monkeypatch.setattr(agent_module.sys, "stdin", io.StringIO("\nfirst question\nsecond question\n"))
     turns: list[str] = []
+    verbose_values: list[bool] = []
 
     def fake_run(awaitable: Any) -> Any:
         # Exercise the coroutine without starting an MCP child or making HTTP requests.
@@ -688,13 +933,14 @@ def test_cli_interactive_empty_input_eof_stdout_and_stderr_separation(
         frame = getattr(awaitable, "cr_frame", None)
         if frame is not None:
             question = frame.f_locals.get("question", "")
+            verbose_values.append(frame.f_locals.get("verbose", False))
         turns.append(question.strip())
         awaitable.close()
         return agent_module.AgentTurnResult(f"answer {len(turns)}", (), 1)
 
     monkeypatch.setattr(agent_module.asyncio, "run", fake_run)
 
-    code = agent_module.main(["--allow-non-git", "--max-steps", "2"])
+    code = agent_module.main(["--allow-non-git", "--max-steps", "2", "--verbose"])
 
     captured = capsys.readouterr()
     assert code == 0
@@ -702,6 +948,7 @@ def test_cli_interactive_empty_input_eof_stdout_and_stderr_separation(
     assert "Enter a non-empty question." in captured.err
     assert "root=" in captured.err and "mode=reduced" in captured.err and "model=" in captured.err
     assert "Question>" in captured.err
+    assert verbose_values == [True, True]
     assert fake_ollama.closed
 
 
@@ -784,6 +1031,46 @@ def test_cli_selects_groq_with_api_key_and_reports_provider(
     assert fake_groq.closed
 
 
+def test_cli_selects_gemini_with_api_key_and_reports_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    context = RootContext(tmp_path.resolve(), RootMode.REDUCED)
+    fake_gemini = FakeOllama([])
+    secret = "test-only-gemini-key"
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", secret)
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    monkeypatch.setattr(agent_module, "resolve_root", lambda *args, **kwargs: context)
+    monkeypatch.setattr(agent_module.sys, "stdin", io.StringIO(""))
+    selected: list[tuple[str, str, int, Any]] = []
+
+    def create_gemini(
+        settings: AgentSettings,
+        api_key: str,
+        *,
+        on_response_chunk: Any = None,
+    ) -> FakeOllama:
+        selected.append((settings.model, api_key, settings.max_steps, on_response_chunk))
+        return fake_gemini
+
+    monkeypatch.setattr(agent_module, "GeminiClient", create_gemini)
+
+    assert agent_module.main(["--allow-non-git", "--verbose"]) == 0
+    assert callable(selected[0][3])
+    selected[0][3]()
+
+    captured = capsys.readouterr()
+    assert selected[0][:3] == (DEFAULT_GEMINI_MODEL, secret, 2)
+    assert "provider=gemini" in captured.err
+    assert f"model={DEFAULT_GEMINI_MODEL}" in captured.err
+    assert "Gemini receives the question and repository excerpts" in captured.err
+    assert "Gemini started streaming response data" in captured.err
+    assert secret not in captured.err
+    assert fake_gemini.closed
+
+
 def test_cli_requires_key_when_groq_is_explicitly_selected(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -801,6 +1088,25 @@ def test_cli_requires_key_when_groq_is_explicitly_selected(
     captured = capsys.readouterr()
     assert "GROQ_API_KEY is not set in this process environment" in captured.err
     assert "provider=ollama" not in captured.err
+
+
+def test_cli_requires_key_when_gemini_is_explicitly_selected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        agent_module,
+        "resolve_root",
+        lambda *args, **kwargs: RootContext(tmp_path.resolve(), RootMode.REDUCED),
+    )
+
+    assert agent_module.main(["--allow-non-git", "--provider", "gemini"]) == 2
+
+    captured = capsys.readouterr()
+    assert "GEMINI_API_KEY is not set in this process environment" in captured.err
+    assert "provider=gemini" not in captured.err
 
 
 def test_child_mcp_context_closes_on_turn_exception(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

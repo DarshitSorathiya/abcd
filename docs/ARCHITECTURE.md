@@ -6,9 +6,11 @@
 - Merge: both register under same root context; custom can call built tools
 
 ## Fallback
-- Use local Ollama (`qwen3:8b`) when `GROQ_API_KEY` is absent.
+- Use local Ollama (`qwen3:8b`) when neither hosted provider key is set.
 - When `GROQ_API_KEY` is set, use Groq's fixed HTTPS chat endpoint and `GROQ_MODEL` (default `qwen/qwen3.8-27b`); do not silently fall back after a Groq request fails.
-- Report the selected provider and model at CLI startup and disclose that Groq receives the question and repository excerpts.
+- When `GEMINI_API_KEY` is set and Groq is not, use Google's fixed Gemini HTTPS endpoint and `GEMINI_MODEL` (default `gemini-3.8-flash`); do not silently fall back after a Gemini request fails.
+- Automatic selection prefers Groq, then Gemini, then Ollama; explicit `--provider` overrides this order.
+- Report the selected provider and model at CLI startup and disclose that the selected hosted provider receives the question and repository excerpts.
 
 ## Safety
 - All agent loops wrapped in try/except

@@ -105,13 +105,20 @@ class GroqClient:
                     if retry_after.isdigit():
                         message = (
                             "Groq rate limit reached (HTTP 429); retry after "
-                            f"{int(retry_after)} seconds. Check account limits if it persists."
+                            f"{int(retry_after)} seconds."
                         )
                     else:
                         message = (
-                            "Groq rate or usage limit reached (HTTP 429); wait before retrying "
-                            "and check account limits if it persists."
+                            "Groq rate limit reached (HTTP 429); wait before retrying."
                         )
+                    detail = _error_detail(body, self._api_key)
+                    if detail is not None:
+                        message += f" Provider detail: {detail}"
+                    rate_headers = _rate_limit_headers(response.headers)
+                    if rate_headers:
+                        message += f" Rate-limit headers: {rate_headers}."
+                    else:
+                        message += " Check the model's organization-level limits."
                     raise AgentError("groq_rate_limited", message)
                 if response.status_code == 413:
                     raise AgentError(
@@ -119,6 +126,14 @@ class GroqClient:
                         "Groq rejected the request as too large (HTTP 413); reduce the question "
                         "or repository context.",
                     )
+                if response.status_code == 400:
+                    detail = _error_detail(body, self._api_key)
+                    message = "Groq rejected the request (HTTP 400)"
+                    if detail is not None:
+                        message += f": {detail}"
+                    else:
+                        message += "; check the selected model and supported request parameters."
+                    raise AgentError("groq_http_error", message)
                 raise AgentError("groq_http_error", f"Groq returned HTTP {response.status_code}")
             try:
                 payload: Any = json.loads(body)
@@ -157,6 +172,49 @@ def _new_session() -> requests.Session:
     session = requests.Session()
     session.trust_env = False
     return session
+
+
+def _error_detail(body: bytes, api_key: str) -> str | None:
+    try:
+        payload: Any = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    payload_object = cast(dict[str, Any], payload)
+    error = payload_object.get("error")
+    if not isinstance(error, dict):
+        return None
+    error_object = cast(dict[str, Any], error)
+    raw_message = error_object.get("message")
+    if not isinstance(raw_message, str):
+        return None
+    message = raw_message.replace(api_key, "[redacted]")
+    message = "".join(character if character.isprintable() else " " for character in message)
+    message = " ".join(message.split())
+    if not message:
+        return None
+    return message[:240]
+
+
+def _rate_limit_headers(headers: Any) -> str:
+    labels = (
+        ("x-ratelimit-remaining-requests", "remaining requests (daily)"),
+        ("x-ratelimit-reset-requests", "request reset"),
+        ("x-ratelimit-remaining-tokens", "remaining tokens (per minute)"),
+        ("x-ratelimit-reset-tokens", "token reset"),
+    )
+    values: list[str] = []
+    for name, label in labels:
+        value = headers.get(name)
+        if isinstance(value, str) and value:
+            clean_value = "".join(
+                character if character.isprintable() else " " for character in value
+            )
+            clean_value = " ".join(clean_value.split())[:48]
+            if clean_value:
+                values.append(f"{label}={clean_value}")
+    return "; ".join(values)
 
 
 def _read_response(response: _Response, limit: int) -> bytes:

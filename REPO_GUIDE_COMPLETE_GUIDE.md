@@ -2,6 +2,28 @@
 
 This guide describes the checked-in implementation, not just the intended design. In particular, Repo Guide has an implemented read-only MCP server and a separate CLI agent, but the SQLite memory/cache helpers and `custom_server.py` are experimental and are not part of the normal installed command flow.
 
+### Run
+
+# terminal - 1
+`
+python -m pip install -e ".[dev]"
+
+repo-guide-mcp --repo . --verbose
+
+`
+# terminal - 2
+
+`
+$secureKey = Read-Host "Gemini API key" -AsSecureString
+$env:GEMINI_API_KEY = [System.Net.NetworkCredential]::new("", $secureKey).Password
+$env:GEMINI_MODEL = "gemini-3.8-flash"
+
+python -m pip install -e ".[dev]"
+
+repo-guide --provider gemini --verbose
+
+`
+
 ## Contents
 
 1. [What Repo Guide is for](#what-repo-guide-is-for)

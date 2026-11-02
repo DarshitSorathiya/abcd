@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any, Sequence, cast
 
@@ -16,6 +17,7 @@ from mcp import Client, StdioServerParameters
 
 from repo_guide import __version__
 from repo_guide.config import (
+    DEFAULT_GEMINI_MODEL,
     DEFAULT_GROQ_MODEL,
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_OLLAMA_MODEL,
@@ -23,6 +25,7 @@ from repo_guide.config import (
 )
 from repo_guide.errors import AgentError, RepoGuideError
 from repo_guide.evidence import EvidenceLedger
+from repo_guide.gemini_client import GeminiClient
 from repo_guide.groq_client import GroqClient
 from repo_guide.ollama_client import ChatClient, OllamaClient
 from repo_guide.root import RootContext, RootMode, resolve_root
@@ -66,11 +69,15 @@ class _Action:
     answer: str | None = None
 
 
-def build_server_parameters(context: RootContext) -> StdioServerParameters:
+def build_server_parameters(
+    context: RootContext, *, verbose: bool = False
+) -> StdioServerParameters:
     """Launch this process's server with the already resolved immutable root."""
     arguments = ["-m", "repo_guide.server", "--repo", str(context.path)]
     if context.mode is RootMode.REDUCED:
         arguments.append("--allow-non-git")
+    if verbose:
+        arguments.append("--verbose")
     return StdioServerParameters(command=sys.executable, args=arguments)
 
 
@@ -104,6 +111,7 @@ async def run_agent_turn(
     *,
     settings: AgentSettings,
     tools: tuple[ToolDefinition, ...] | None = None,
+    verbose: bool = False,
 ) -> AgentTurnResult:
     """Run bounded tool/observe/reason steps over one active MCP session."""
     original_question = question.strip()
@@ -128,7 +136,9 @@ async def run_agent_turn(
 
     for step in range(1, settings.max_steps + 1):
         user_prompt = _make_user_prompt(original_question, catalogue_text, ledger, settings)
-        action = await _request_action(chat_client, system_message, user_prompt, settings)
+        action = await _request_action(
+            chat_client, system_message, user_prompt, settings, verbose=verbose, decision=step
+        )
         if action.action == "final":
             answer = (action.answer or "").strip()
             if not answer:
@@ -263,16 +273,40 @@ async def _request_action(
     system_message: dict[str, str],
     user_prompt: str,
     settings: AgentSettings,
+    *,
+    verbose: bool = False,
+    decision: int = 1,
 ) -> _Action:
     messages = [system_message, {"role": "user", "content": user_prompt}]
-    response = await asyncio.to_thread(chat_client.chat, messages)
+    provider = str(getattr(chat_client, "provider", "model"))
+    if verbose:
+        print(
+            f"repo-guide: {provider} request {decision} started; "
+            f"response read timeout is {settings.read_timeout_seconds:g}s between chunks",
+            file=sys.stderr,
+            flush=True,
+        )
+    started_at = time.monotonic()
+    try:
+        response = await asyncio.to_thread(chat_client.chat, messages)
+    finally:
+        if verbose:
+            elapsed = time.monotonic() - started_at
+            print(
+                f"repo-guide: {provider} request {decision} finished after {elapsed:.1f}s",
+                file=sys.stderr,
+                flush=True,
+            )
     try:
         return _parse_action(response)
     except AgentError as first_error:
-        if getattr(chat_client, "provider", None) == "groq":
+        provider = getattr(chat_client, "provider", None)
+        if provider in {"groq", "gemini"}:
+            provider_name = "Gemini" if provider == "gemini" else "Groq"
             raise AgentError(
                 "model_action_unusable",
-                "Groq returned an unusable action; one request was used. Retry the question.",
+                f"{provider_name} returned an unusable action; one request was used. "
+                "Retry the question.",
             ) from first_error
         repair = (
             f"The previous response failed strict action validation ({first_error.code}). "
@@ -324,6 +358,14 @@ def _serialize_catalogue(tools: tuple[ToolDefinition, ...], max_chars: int) -> s
     if len(text) > max_chars:
         raise AgentError("tool_catalogue_too_large", "discovered tool catalogue exceeds the context limit")
     return text
+
+
+def _report_gemini_stream_started() -> None:
+    print(
+        "repo-guide: Gemini started streaming response data; final JSON will be shown when complete",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _tool_result_payload(result: Any, max_chars: int) -> dict[str, Any]:
@@ -427,12 +469,19 @@ async def _run_turn_with_server(
     chat_client: ChatClient,
     question: str,
     settings: AgentSettings,
+    *,
+    verbose: bool = False,
 ) -> AgentTurnResult:
-    parameters = build_server_parameters(context)
+    parameters = build_server_parameters(context, verbose=verbose)
     async with Client(parameters) as client:
         catalogue = await discover_tools(client, settings)
         candidate = await run_agent_turn(
-            client, chat_client, question, settings=settings, tools=catalogue
+            client,
+            chat_client,
+            question,
+            settings=settings,
+            tools=catalogue,
+            verbose=verbose,
         )
         report = await verify_and_reflect(
             context,
@@ -441,7 +490,7 @@ async def _run_turn_with_server(
             candidate.evidence,
             chat_client,
             settings,
-            enable_reflection=getattr(chat_client, "provider", None) != "groq",
+            enable_reflection=getattr(chat_client, "provider", None) not in {"groq", "gemini"},
         )
         return AgentTurnResult(
             report.final_answer,
@@ -473,15 +522,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--allow-non-git", action="store_true", help="enable reduced filesystem-only mode")
     parser.add_argument(
         "--provider",
-        choices=("auto", "groq", "ollama"),
+        choices=("auto", "gemini", "groq", "ollama"),
         default="auto",
-        help="model provider (auto selects Groq when GROQ_API_KEY is set; default: auto)",
+        help=(
+            "model provider (auto selects Groq, then Gemini, when their API key is set; "
+            "default: auto)"
+        ),
     )
     parser.add_argument("--model", help="model ID for the selected provider")
     parser.add_argument("--ollama-url", help="Ollama origin (default from OLLAMA_BASE_URL or central config)")
     parser.add_argument("--allow-remote-ollama", action="store_true", help="explicitly permit HTTPS remote model endpoint")
-    parser.add_argument("--max-steps", type=int, default=4, help="maximum model decisions per question (1–32)")
-    parser.add_argument("--verbose", action="store_true", help="write non-sensitive diagnostics to stderr")
+    parser.add_argument("--max-steps", type=int, default=2, help="maximum model decisions per question (1–32)")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="show non-sensitive CLI and MCP tool diagnostics on stderr",
+    )
     parser.add_argument("--version", action="version", version=f"repo-guide {__version__}")
     args = parser.parse_args(argv)
     exit_code = 0
@@ -489,18 +545,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         context = resolve_root(args.repo, allow_non_git=args.allow_non_git)
         groq_api_key = os.environ.get("GROQ_API_KEY", "").strip()
+        gemini_api_key = os.environ.get("GEMINI_API_KEY", "").strip()
         provider = args.provider
         if provider == "auto":
-            provider = "groq" if groq_api_key else "ollama"
+            provider = "groq" if groq_api_key else "gemini" if gemini_api_key else "ollama"
         if provider == "groq" and not groq_api_key:
             raise AgentError(
                 "groq_api_key_missing",
                 "Groq was selected but GROQ_API_KEY is not set in this process environment",
             )
+        if provider == "gemini" and not gemini_api_key:
+            raise AgentError(
+                "gemini_api_key_missing",
+                "Gemini was selected but GEMINI_API_KEY is not set in this process environment",
+            )
         default_model = (
             os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL)
             if provider == "groq"
-            else os.environ.get("REPO_GUIDE_MODEL", DEFAULT_OLLAMA_MODEL)
+            else (
+                os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+                if provider == "gemini"
+                else os.environ.get("REPO_GUIDE_MODEL", DEFAULT_OLLAMA_MODEL)
+            )
         )
         settings = AgentSettings(
             model=args.model or default_model,
@@ -512,7 +578,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_steps=args.max_steps,
         )
         chat_client: ChatClient = (
-            GroqClient(settings, groq_api_key) if provider == "groq" else OllamaClient(settings)
+            GroqClient(settings, groq_api_key)
+            if provider == "groq"
+            else (
+                GeminiClient(
+                    settings,
+                    gemini_api_key,
+                    on_response_chunk=(
+                        _report_gemini_stream_started if args.verbose else None
+                    ),
+                )
+                if provider == "gemini"
+                else OllamaClient(settings)
+            )
         )
     except RepoGuideError as exc:
         print(f"repo-guide: {exc.message}", file=sys.stderr)
@@ -527,9 +605,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         file=sys.stderr,
         flush=True,
     )
-    if provider == "groq":
+    if provider in {"groq", "gemini"}:
+        provider_name = "Gemini" if provider == "gemini" else "Groq"
         print(
-            "repo-guide: Groq receives the question and repository excerpts used for this answer",
+            f"repo-guide: {provider_name} receives the question and repository excerpts "
+            "used for this answer",
             file=sys.stderr,
             flush=True,
         )
@@ -551,7 +631,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print("Enter a non-empty question.", file=sys.stderr)
                 continue
             try:
-                result = asyncio.run(_run_turn_with_server(context, chat_client, question, settings))
+                result = asyncio.run(
+                    _run_turn_with_server(
+                        context, chat_client, question, settings, verbose=args.verbose
+                    )
+                )
             except KeyboardInterrupt:
                 print("", file=sys.stderr)
                 break

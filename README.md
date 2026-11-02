@@ -16,7 +16,7 @@ This pack gives GitHub Copilot the project contract, architecture, security mode
 
 ## Product in one paragraph
 
-Repo Guide is a local, read-only repository onboarding agent. It uses a Python MCP server to expose bounded tools for repository tree/file/search/history and public GitHub issues; a separate CLI agent uses local Ollama by default, or Groq's hosted chat API when `GROQ_API_KEY` is set, to choose tools, observe results, and stop when it has evidence. Final repository claims cite repository-relative `path:line` locations or commit hashes. Programmatic verification rejects invalid citations before output. MCP clients such as VS Code Copilot Chat and MCP Inspector can launch the same server independently; they use their own model. The CLI agent does not run inside Copilot Chat.
+Repo Guide is a local, read-only repository onboarding agent. It uses a Python MCP server to expose bounded tools for repository tree/file/search/history and public GitHub issues; a separate CLI agent uses local Ollama by default, or the hosted Groq/Gemini API when configured, to choose tools, observe results, and stop when it has evidence. Final repository claims cite repository-relative `path:line` locations or commit hashes. Programmatic verification rejects invalid citations before output. MCP clients such as VS Code Copilot Chat and MCP Inspector can launch the same server independently; they use their own model. The CLI agent does not run inside Copilot Chat.
 
 ## Current protocol note (verified 21 Oct 2026)
 
@@ -45,20 +45,20 @@ Packaging and CLI smoke tests were run on Linux with Python 3.12. Windows and ma
 
 ## CLI model provider
 
-Without `GROQ_API_KEY`, `repo-guide` uses local Ollama (`qwen3:8b` by default). To use Groq from PowerShell, enter the key securely and set it in the **same PowerShell window** before starting the CLI:
+Without a hosted API key, `repo-guide` uses local Ollama (`qwen3:8b` by default). To use Gemini from PowerShell, enter the key securely and set it in the **same PowerShell window** before starting the CLI:
 
 ```powershell
-$secureKey = Read-Host "Groq API key" -AsSecureString
-$env:GROQ_API_KEY = [System.Net.NetworkCredential]::new("", $secureKey).Password
+$secureKey = Read-Host "Gemini API key" -AsSecureString
+$env:GEMINI_API_KEY = [System.Net.NetworkCredential]::new("", $secureKey).Password
 try {
-    repo-guide --repo .
+    repo-guide --provider gemini --repo .
 } finally {
-    Remove-Item Env:GROQ_API_KEY -ErrorAction SilentlyContinue
+    Remove-Item Env:GEMINI_API_KEY -ErrorAction SilentlyContinue
     Remove-Variable secureKey -ErrorAction SilentlyContinue
 }
 ```
 
-The CLI automatically selects Groq when that process variable is set; startup should show `provider=groq`. Without the key it shows `provider=ollama`. `--provider groq` requires the key, `--provider ollama` forces local Ollama, and `--provider auto` uses the same automatic selection. `GROQ_MODEL` optionally selects a Groq model (default `qwen/qwen3.8-27b`), while `--model` overrides the model ID for the selected provider. Groq receives the question and repository excerpts used to answer it; use this only when that disclosure is acceptable. Credentials are read from the environment, not a repository key file. `repo-guide-mcp` is only the repository-tools server; launching it separately does not select the CLI chat provider.
+`--provider gemini` requires `GEMINI_API_KEY`; startup should show `provider=gemini`. `GEMINI_MODEL` optionally selects a Gemini model (default `gemini-3.8-flash`), while `--model` overrides the model ID. The CLI also supports Groq with `GROQ_API_KEY`/`GROQ_MODEL` and Ollama with `REPO_GUIDE_MODEL`. Automatic selection prefers Groq when its key is set, then Gemini, then local Ollama; use `--provider` to choose explicitly when more than one hosted key is configured. Hosted providers receive the question and repository excerpts used to answer it; use them only when that disclosure is acceptable. Credentials are read from the process environment, not repository files. `repo-guide-mcp` is only the repository-tools server; launching it separately does not select the CLI chat provider.
 
 ## IDE MCP clients
 

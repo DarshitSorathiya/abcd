@@ -6,7 +6,7 @@ Security requirements are release blockers. The server may inspect untrusted rep
 
 - **Trusted code/config:** packaged Repo Guide code and explicit launch arguments.
 - **Untrusted data:** file contents, filenames, symlink targets, Git metadata, branches, commit messages, remote URLs, GitHub issue titles/labels, LLM outputs, model responses and client-supplied tool arguments.
-- **External services:** public GitHub API and, when `GROQ_API_KEY` is explicitly set, Groq's hosted chat API. Treat their responses as untrusted; Groq receives the user's question and repository excerpts included in model prompts.
+- **External services:** public GitHub API and, when `GROQ_API_KEY` or `GEMINI_API_KEY` is explicitly set, the corresponding hosted chat API. Treat their responses as untrusted; the selected hosted model receives the user's question and repository excerpts included in prompts.
 - **Model:** output is untrusted and must be schema-validated; a local or hosted model is not a security boundary.
 
 ## Mandatory controls
@@ -45,6 +45,12 @@ Deny `.git/**`, `.env*`, private/public key files where likely credentials are s
 - Use only the fixed HTTPS Groq chat-completions endpoint with redirects disabled, certificate verification enabled, bounded request/response sizes, and explicit connect/read timeouts.
 - The hosted provider is opt-in only: select it only when `GROQ_API_KEY` is set in the process environment. Never read credentials from repository files, log them, include them in prompts, or probe Groq during startup.
 - Tell the user at startup that prompts and retrieved repository excerpts are sent to Groq. Do not silently fall back to a hosted provider when no key is configured.
+
+### Gemini API
+
+- The hosted provider is opt-in only: select it only when `GEMINI_API_KEY` is set in the process environment. Never read credentials from repository files, log them, place them in the URL or prompt, or probe Gemini during startup.
+- Use only the fixed `generativelanguage.googleapis.com` HTTPS `streamGenerateContent` endpoint, request server-sent events, send the key in `x-goog-api-key`, disable redirects, verify TLS, and enforce bounded request/response sizes and explicit timeouts.
+- Tell the user that prompts and retrieved repository excerpts are sent to Gemini. Do not silently fall back to a hosted provider when no key is configured.
 
 ### Prompt injection and LLM outputs
 
