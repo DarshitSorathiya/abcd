@@ -25,7 +25,7 @@ class AgentSettings:
     max_output_tokens: int = 1_024
     max_observation_chars: int = 8_000
     max_context_chars: int = 24_000
-    max_steps: int = 8
+    max_steps: int = 4
     tool_timeout_seconds: float = 30.0
     max_tools: int = 64
 

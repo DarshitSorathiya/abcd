@@ -416,6 +416,50 @@ def test_repository_question_without_evidence_or_citations_fails_closed(repo: Ro
     assert "repository_answer_has_no_verifiable_citation" in report.verification_errors
 
 
+def test_disabled_reflection_keeps_deterministic_citation_checks(repo: RootContext) -> None:
+    evidence = file_evidence("src/main file.py", 1, 1)
+    answer = "The function is defined here: `src/main file.py:1`."
+    ollama = FakeOllama([])
+
+    report = asyncio.run(
+        verify_and_reflect(
+            repo,
+            "Where is the function?",
+            answer,
+            evidence,
+            ollama,
+            AgentSettings(),
+            enable_reflection=False,
+        )
+    )
+
+    assert report.safe_to_display
+    assert report.final_answer == answer
+    assert report.reflection_attempted is False
+    assert ollama.messages == []
+
+
+def test_disabled_reflection_still_requires_repository_citation(repo: RootContext) -> None:
+    ollama = FakeOllama([])
+
+    report = asyncio.run(
+        verify_and_reflect(
+            repo,
+            "Where is the function?",
+            "The function is in the source file.",
+            (),
+            ollama,
+            AgentSettings(),
+            enable_reflection=False,
+        )
+    )
+
+    assert not report.safe_to_display
+    assert "repository_answer_has_no_verifiable_citation" in report.verification_errors
+    assert "couldn't safely verify" in report.final_answer
+    assert ollama.messages == []
+
+
 def test_duplicate_reflection_json_keys_are_rejected(repo: RootContext) -> None:
     evidence = file_evidence("src/main file.py", 1, 1)
     answer = "Supported at `src/main file.py:1`."

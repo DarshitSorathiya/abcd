@@ -1,79 +1,40 @@
-# Repo Guide — How to Run & API Keys
+# Repo Guide — Quick Run Guide
+
+For the full architecture, data flow, security model, IDE setup, module reference, limitations, and SQLite prototype analysis, see [docs/REPO_GUIDE_COMPLETE_GUIDE.md](docs/REPO_GUIDE_COMPLETE_GUIDE.md).
 
 ## Quick Start
 
-```bash
+```powershell
 # 1. Install
 python -m pip install -e ".[dev]"
 
-# 2. Set your Groq API key (optional — used for model fallback)
-#    Create the file below and add your key:
-#    C:\Users\<you>\.repo_guide\keys.env
-#    Content: GROQ_API_KEY=your_key_here
-
-# 3. Set local model (optional — default qwen3:8b)
-#    Same file or environment:
-#    REPO_GUIDE_MODEL=qwen3:8b
-
-# 4. Run MCP server
+# 2. Start the read-only MCP server (for IDE/MCP clients)
 repo-guide-mcp --repo . --verbose
 
-# 5. Run CLI agent (requires local Ollama running)
-repo-guide --model qwen3:8b --max-steps 8 --verbose
-
-# 6. Run unified custom server (memory + cache + fallback)
-python -m repo_guide.custom_server --repo .
+# 3. Run the interactive CLI agent (Ollama by default)
+repo-guide --repo . --verbose
 ```
 
-## Where to Put API Keys
+Ollama is the default provider and must be running locally with the selected model available. To use Groq, set `GROQ_API_KEY` in the same process environment before launching `repo-guide`. For example, enter the key securely in PowerShell:
 
-File: `C:\Users\<your_username>\.repo_guide\keys.env`
-
-This file is read by `memory_cache.py` (line `os.environ.get("GROQ_API_KEY")`). It is not checked into git and stays on your machine only. Example:
-
-```
-GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-REPO_GUIDE_MODEL=qwen3:8b
-OLLAMA_URL=http://localhost:11434
+```powershell
+$secureKey = Read-Host "Groq API key" -AsSecureString
+$env:GROQ_API_KEY = [System.Net.NetworkCredential]::new("", $secureKey).Password
+repo-guide --repo . --verbose
+Remove-Item Env:GROQ_API_KEY
+Remove-Variable secureKey
 ```
 
-The code looks for this exact file first, then falls back to the system environment (`os.environ`). Never put keys in `pyproject.toml`, source files, or commit them.
+The CLI does not load credentials from `keys.env` or other repository files. Never commit a key or paste it into chat. Rotate any key that was exposed.
 
-## Memory & Cache (SQLite DB)
+The standard CLI defaults to four model decisions per question. Groq may still reject requests with HTTP 429 when a provider-side rate or usage limit is reached.
 
-Location: `C:\Users\<your_username>\.repo_guide\agent.db`
-
-This is a real SQLite database (not JSON). Tables:
-- `memory` (key, value) — stores conversation state and last `/goal` step
-- `cache` (key, value, hits, misses) — stores responses; hit ratio measured on read
-
-To inspect manually:
-```bash
-sqlite3 C:\Users\<you>\.repo_guide\agent.db "SELECT * FROM memory;"
-sqlite3 C:\Users\<you>\.repo_guide\agent.db "SELECT * FROM cache;"
-```
-
-## Project Files You Added This Session
-
-- `docs/ARCHITECTURE.md` — unified built + custom MCP design
-- `src/repo_guide/custom_server.py` — entry point using SQLite + Groq
-- `src/repo_guide/memory_cache.py` — DB memory, DB cache, `fallback_model()`, crash-safe `/goal` loop
-
-## Safety Reminders (From Security Audit)
-
-- Symlink paths are denied (`safety.py`)
-- Sensitive files (`.env`, `.git`) are blocked
-- Binary/minified files are blocked
-- File size capped at 1,000,000 bytes
-- Agent stops at 8 steps (configurable)
-- All loops are wrapped in `try/except` (no crash in production)
+SQLite memory/cache helpers and `custom_server.py` are experimental, are not used by the standard commands, and should not be treated as an API-cost optimization. Their behavior and limitations are documented in the complete guide.
 
 ## Tests
 
-```bash
-pytest -q
-pytest tests/unit/ -q
-pytest tests/security/ -q
+```powershell
+uv run pytest -q
 ```
 
-Expected: 76 passed, 3 skipped (symlink unavailable on Windows without developer mode).
+Do not rely on a hard-coded expected test count; report the count observed from the current run.

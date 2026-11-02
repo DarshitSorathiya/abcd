@@ -49,7 +49,7 @@ Run the CLI entry points directly:
 
 ```bash
 repo-guide-mcp --repo /path/to/repo --verbose
-repo-guide --model qwen3:8b --max-steps 8 --verbose
+repo-guide --model qwen3:8b --max-steps 4 --verbose
 ```
 
 ## High-level architecture

@@ -100,6 +100,25 @@ class GroqClient:
                 raise AgentError("groq_redirect_denied", "Groq endpoint redirects are not followed")
             body = _read_response(response, self.settings.max_response_bytes)
             if response.status_code < 200 or response.status_code >= 300:
+                if response.status_code == 429:
+                    retry_after = response.headers.get("Retry-After", "")
+                    if retry_after.isdigit():
+                        message = (
+                            "Groq rate limit reached (HTTP 429); retry after "
+                            f"{int(retry_after)} seconds. Check account limits if it persists."
+                        )
+                    else:
+                        message = (
+                            "Groq rate or usage limit reached (HTTP 429); wait before retrying "
+                            "and check account limits if it persists."
+                        )
+                    raise AgentError("groq_rate_limited", message)
+                if response.status_code == 413:
+                    raise AgentError(
+                        "groq_request_too_large",
+                        "Groq rejected the request as too large (HTTP 413); reduce the question "
+                        "or repository context.",
+                    )
                 raise AgentError("groq_http_error", f"Groq returned HTTP {response.status_code}")
             try:
                 payload: Any = json.loads(body)

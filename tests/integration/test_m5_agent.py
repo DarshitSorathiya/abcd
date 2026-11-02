@@ -193,6 +193,18 @@ def test_groq_client_sanitizes_http_errors_and_closes_response() -> None:
     assert response_obj.closed
 
 
+def test_groq_client_reports_rate_limit_retry_delay() -> None:
+    response_obj = FakeResponse(status=429, headers={"Retry-After": "17"})
+    client = GroqClient(fake_settings(), "test-api-key", session=FakeHttpSession([response_obj]))
+
+    with pytest.raises(AgentError) as error:
+        client.chat([{"role": "user", "content": "question"}])
+
+    assert error.value.code == "groq_rate_limited"
+    assert "retry after 17 seconds" in error.value.message
+    assert response_obj.closed
+
+
 @pytest.mark.parametrize(
     ("response_obj", "code"),
     [
@@ -351,6 +363,29 @@ def test_json_recovery_failure_returns_controlled_agent_error() -> None:
         )
     assert error.value.code == "model_action_unusable"
     assert len(ollama.messages) == 3
+
+
+def test_groq_invalid_action_does_not_spend_requests_on_recovery() -> None:
+    class FakeGroq(FakeOllama):
+        provider = "groq"
+
+    groq = FakeGroq(["not json"])
+    with pytest.raises(AgentError) as error:
+        asyncio.run(
+            agent_module._request_action(
+                groq,
+                {"role": "system", "content": agent_module._SYSTEM_PROMPT},
+                "question",
+                fake_settings(),
+            )
+        )
+
+    assert error.value.code == "model_action_unusable"
+    assert len(groq.messages) == 1
+
+
+def test_default_model_decision_budget_is_four() -> None:
+    assert AgentSettings().max_steps == 4
 
 
 def test_dynamic_tool_discovery_supports_pagination() -> None:
@@ -667,6 +702,37 @@ def test_cli_interactive_empty_input_eof_stdout_and_stderr_separation(
     assert "Enter a non-empty question." in captured.err
     assert "root=" in captured.err and "mode=reduced" in captured.err and "model=" in captured.err
     assert "Question>" in captured.err
+    assert fake_ollama.closed
+
+
+def test_cli_reports_safe_error_wrapped_by_mcp_task_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    context = RootContext(tmp_path.resolve(), RootMode.REDUCED)
+    fake_ollama = FakeOllama([])
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setattr(agent_module, "resolve_root", lambda *args, **kwargs: context)
+    monkeypatch.setattr(agent_module, "OllamaClient", lambda settings: fake_ollama)
+    monkeypatch.setattr(agent_module.sys, "stdin", io.StringIO("tell me about this repo\n"))
+
+    class WrappedFailure(Exception):
+        def __init__(self, *exceptions: Exception) -> None:
+            self.exceptions = exceptions
+
+    def fail_run(awaitable: Any) -> None:
+        awaitable.close()
+        raise WrappedFailure(
+            WrappedFailure(AgentError("provider_failure", "The model provider returned HTTP 429"))
+        )
+
+    monkeypatch.setattr(agent_module.asyncio, "run", fail_run)
+
+    code = agent_module.main(["--allow-non-git"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "The model provider returned HTTP 429" in captured.err
+    assert "MCP server or agent turn failed safely" not in captured.err
     assert fake_ollama.closed
 
 

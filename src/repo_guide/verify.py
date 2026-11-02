@@ -11,7 +11,7 @@ import asyncio
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -299,6 +299,8 @@ async def verify_and_reflect(
     evidence: tuple[dict[str, Any], ...],
     ollama: _ChatClient,
     settings: AgentSettings,
+    *,
+    enable_reflection: bool = True,
 ) -> VerificationReport:
     """Verify, optionally reflect once, safely sanitize, and re-verify citations."""
     commit_cache: dict[str, bool] = {}
@@ -306,8 +308,22 @@ async def verify_and_reflect(
     provenance = _provenance_from_evidence(evidence)
     citations = extract_citations(answer)
     requires_repository = _question_requires_repository_evidence(question)
-    should_reflect = provenance.has_repository_evidence or bool(citations) or requires_repository
+    should_reflect = enable_reflection and (
+        provenance.has_repository_evidence or bool(citations) or requires_repository
+    )
     if not should_reflect:
+        if not enable_reflection and requires_repository and not citations:
+            errors = tuple(
+                dict.fromkeys(
+                    (*first.verification_errors, "repository_answer_has_no_verifiable_citation")
+                )
+            )
+            return replace(
+                first,
+                final_answer=_safe_fallback(first.final_answer, errors),
+                verification_errors=errors,
+                safe_to_display=False,
+            )
         return first
 
     reflection_error: str | None = None

@@ -35,7 +35,7 @@ The root is fixed for the process lifetime. No MCP tool accepts a root or lets t
 Package uses `pyproject.toml` with console entry points:
 
 - `repo-guide-mcp`: `--repo PATH`, `--allow-non-git`, `--verbose`, `--version`.
-- `repo-guide`: optional repo path plus `--model`, `--max-steps` (default 8), `--verbose`, `--version`.
+- `repo-guide`: optional repo path plus `--model`, `--max-steps` (default 4), `--verbose`, `--version`.
 
 Install into a virtual environment for development; document pipx/uv for isolated user installs. The command must work outside the project directory. The CLI agent launches its child server with the same interpreter (`sys.executable -m repo_guide.server --repo ...`) and fixed arguments. Never rely on shell activation. Document absolute executable paths for IDEs where PATH differs.
 
@@ -64,7 +64,7 @@ The agent must not rely on resources/prompts being supported; essential behavior
 
 ## 7. Agent loop
 
-- Maximum 8 steps by default.
+- Maximum 4 model decisions by default to limit hosted-provider requests; the CLI option can raise this to 32.
 - Each model action must match one schema: `{"action":"<tool>","args":{...}}` or `{"action":"final","answer":"..."}`.
 - Discover tools at startup using MCP; do not hardcode stale tool schemas into the prompt.
 - Validate model JSON and tool arguments before calls. Unknown tools, invalid args, duplicate identical calls and repeated malformed JSON are handled without an infinite loop.
@@ -84,6 +84,7 @@ Citation existence is not proof that a claim is semantically supported. Maintain
 
 - Ollama runs locally by default; model name is configurable, never embedded across code. Set bounded request timeouts and response-size limits. Check process/model availability only when a CLI answer is requested, not when the MCP server starts.
 - Setting `GROQ_API_KEY` opts the CLI into the fixed Groq HTTPS chat endpoint; `GROQ_MODEL` selects its model, defaulting to `qwen/qwen3.8-27b`. Announce this provider and warn that the question and repository excerpts are sent to Groq. Read credentials only from the process environment; never probe the service at startup.
+- For Groq, make one request per model decision without JSON-repair retries, and skip optional LLM reflection; deterministic citation checks remain mandatory. Do not automatically retry HTTP 429 responses, which may represent exhausted account quotas rather than transient rate limits.
 - Default Ollama endpoint should be loopback. A remote Ollama endpoint requires an explicit opt-in setting and warning; never silently send repository contents to a remote model.
 - GitHub REST requests are unauthenticated and public-only. Set a descriptive User-Agent, connect/read timeout (20 seconds maximum), bounded response size, safe retry/backoff for transient errors and 429/5xx, respect `Retry-After` and rate-limit headers, and stop retrying when the API reports quota exhaustion. Avoid repeated identical requests; cache only if implemented with a bounded TTL and outside the repository.
 - Never make a network request during MCP server initialization. Do not add telemetry.

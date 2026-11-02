@@ -269,6 +269,11 @@ async def _request_action(
     try:
         return _parse_action(response)
     except AgentError as first_error:
+        if getattr(chat_client, "provider", None) == "groq":
+            raise AgentError(
+                "model_action_unusable",
+                "Groq returned an unusable action; one request was used. Retry the question.",
+            ) from first_error
         repair = (
             f"The previous response failed strict action validation ({first_error.code}). "
             "Return exactly one valid JSON object in the required action schema. Do not include prose."
@@ -391,6 +396,19 @@ def _step_limit_result(ledger: EvidenceLedger, max_steps: int) -> AgentTurnResul
     return AgentTurnResult(answer, _evidence_dicts(ledger), max_steps, incomplete=True)
 
 
+def _find_repo_guide_error(error: Exception) -> RepoGuideError | None:
+    if isinstance(error, RepoGuideError):
+        return error
+    nested_errors = getattr(error, "exceptions", ())
+    if isinstance(nested_errors, tuple):
+        for nested_error in cast(tuple[object, ...], nested_errors):
+            if isinstance(nested_error, Exception):
+                safe_error = _find_repo_guide_error(nested_error)
+                if safe_error is not None:
+                    return safe_error
+    return None
+
+
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"invalid JSON constant: {value}")
 
@@ -423,6 +441,7 @@ async def _run_turn_with_server(
             candidate.evidence,
             chat_client,
             settings,
+            enable_reflection=getattr(chat_client, "provider", None) != "groq",
         )
         return AgentTurnResult(
             report.final_answer,
@@ -461,7 +480,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--model", help="model ID for the selected provider")
     parser.add_argument("--ollama-url", help="Ollama origin (default from OLLAMA_BASE_URL or central config)")
     parser.add_argument("--allow-remote-ollama", action="store_true", help="explicitly permit HTTPS remote model endpoint")
-    parser.add_argument("--max-steps", type=int, default=8, help="maximum model decisions per question (1–32)")
+    parser.add_argument("--max-steps", type=int, default=4, help="maximum model decisions per question (1–32)")
     parser.add_argument("--verbose", action="store_true", help="write non-sensitive diagnostics to stderr")
     parser.add_argument("--version", action="version", version=f"repo-guide {__version__}")
     args = parser.parse_args(argv)
@@ -540,8 +559,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"repo-guide: {exc.message}", file=sys.stderr)
                 exit_code = 1
                 break
-            except Exception:
-                print("repo-guide: MCP server or agent turn failed safely; check the server and retry.", file=sys.stderr)
+            except Exception as exc:
+                safe_error = _find_repo_guide_error(exc)
+                if safe_error is not None:
+                    print(f"repo-guide: {safe_error.message}", file=sys.stderr)
+                else:
+                    print(
+                        "repo-guide: MCP server or agent turn failed safely; "
+                        "check the server and retry.",
+                        file=sys.stderr,
+                    )
+                    if args.verbose:
+                        print(
+                            f"repo-guide: failure type={type(exc).__name__}",
+                            file=sys.stderr,
+                        )
                 exit_code = 1
                 break
             print(result.answer, file=sys.stdout, flush=True)
