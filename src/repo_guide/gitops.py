@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import heapq
+import json
 import os
 import re
 import shutil
@@ -14,6 +15,14 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import BinaryIO
+
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        tomllib = None
 
 from repo_guide.config import SafetyLimits
 from repo_guide.errors import PathPolicyError, RepoGuideError, RootResolutionError
@@ -217,21 +226,27 @@ def list_tree(
         try:
             remaining = cap - len(entries)
             with os.scandir(directory) as iterator:
-                children = heapq.nsmallest(
-                    remaining + 1,
-                    iterator,
-                    key=lambda item: (item.name.casefold(), item.name),
-                )
+                all_children = list(iterator)
         except OSError as exc:
             raise PathPolicyError("directory_unavailable", "repository directory could not be listed") from exc
 
-        if len(children) > remaining:
+        # Filter excluded directories first
+        filtered_children = [
+            c for c in all_children
+            if not (c.is_dir() and c.name.casefold() in {name.casefold() for name in _EXCLUDED_DIRECTORIES})
+        ]
+        filtered_children.sort(key=lambda item: (item.name.casefold(), item.name))
+
+        if len(filtered_children) > remaining:
             truncated = True
-            children = children[: remaining + 1]
+            children = filtered_children[:remaining]
+        else:
+            children = filtered_children
+
         for child in children:
             rel_path = child.path
             relative_entry = Path(rel_path).relative_to(context.path).as_posix()
-            if child.name.casefold() in {name.casefold() for name in _EXCLUDED_DIRECTORIES}:
+            if child.is_dir() and child.name.casefold() in {name.casefold() for name in _EXCLUDED_DIRECTORIES}:
                 continue
             if is_sensitive_repo_path(context.path, relative_entry):
                 continue
@@ -526,6 +541,232 @@ def commit_exists(context: RootContext, commit_hash: str) -> bool:
         accepted_codes={0, 1, 128},
     )
     return result.returncode == 0
+
+
+@dataclass(frozen=True, slots=True)
+class DependencyInfo:
+    """One parsed dependency with source file."""
+    name: str
+    version: str | None
+    source_file: str
+    is_dev: bool
+    is_optional: bool
+
+
+@dataclass(frozen=True, slots=True)
+class DependencyAnalysis:
+    """Aggregated dependency analysis result."""
+    dependencies: tuple[DependencyInfo, ...]
+    sources: tuple[str, ...]
+    total_count: int
+    dev_count: int
+
+
+def analyze_dependencies(context: RootContext) -> DependencyAnalysis:
+    """Parse and aggregate dependencies from common dependency files."""
+    sources = []
+    deps: list[DependencyInfo] = []
+
+    # Define patterns for common dependency files
+    patterns = [
+        ("pyproject.toml", _parse_pyproject_deps),
+        ("requirements.txt", _parse_requirements_deps),
+        ("package.json", _parse_package_json_deps),
+    ]
+
+    for filename, parser in patterns:
+        try:
+            content = read_repo_file(context, filename, max_lines=context.limits.max_file_bytes)
+            sources.append(filename)
+            parsed = parser(content, filename)
+            deps.extend(parsed)
+        except (RepoGuideError, PathPolicyError):
+            continue  # File not found or inaccessible
+        except Exception:
+            continue  # Skip unparseable files
+
+    dev_count = sum(1 for d in deps if d.is_dev)
+    deps.sort(key=lambda d: (d.name.casefold(), d.source_file))
+    return DependencyAnalysis(
+        tuple(deps),
+        tuple(sources),
+        len(deps),
+        dev_count
+    )
+
+
+def _parse_pyproject_deps(content: str, source_file: str) -> list[DependencyInfo]:
+    """Parse dependencies from pyproject.toml."""
+    deps: list[DependencyInfo] = []
+
+    # Try to parse TOML if available
+    if tomllib is not None:
+        try:
+            data = tomllib.loads(content)
+            project = data.get("project", {})
+
+            # Parse main dependencies
+            for dep_str in project.get("dependencies", []):
+                dep = _parse_requirement_line(dep_str, source_file, is_dev=False)
+                if dep:
+                    deps.append(dep)
+
+            # Parse optional dependencies (like dev dependencies)
+            optional = project.get("optional-dependencies", {})
+            for group_name, dep_list in optional.items():
+                is_dev_group = group_name.lower() in ["dev", "development", "test", "testing", "docs"]
+                for dep_str in dep_list:
+                    dep = _parse_requirement_line(dep_str, source_file, is_dev=is_dev_group)
+                    if dep:
+                        deps.append(dep)
+
+            return deps
+        except Exception:
+            pass  # Fall back to line-by-line parsing
+
+    # Fallback: line-by-line parsing for basic toml-like format
+    in_dependencies = False
+    in_dev_dependencies = False
+    current_section = ""
+
+    for line in content.splitlines():
+        stripped = line.strip()
+
+        # Handle section headers (toml)
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1].lower()
+            in_dependencies = "dependencies" in section and "dev" not in section
+            in_dev_dependencies = "dependencies" in section and "dev" in section
+            current_section = section
+            continue
+
+        # Skip comments and empty lines
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        # Skip tools sections
+        if current_section.startswith("tool."):
+            continue
+
+        if in_dependencies or in_dev_dependencies:
+            # Extract dependency from quoted string
+            if stripped.startswith('"') or stripped.startswith("'"):
+                dep_str = stripped.strip('"\'').strip(",")
+                dep = _parse_requirement_line(dep_str, source_file, is_dev=in_dev_dependencies)
+                if dep:
+                    deps.append(dep)
+
+    return deps
+
+
+def _parse_requirements_deps(content: str, source_file: str) -> list[DependencyInfo]:
+    """Parse dependencies from requirements.txt."""
+    deps: list[DependencyInfo] = []
+
+    for line in content.splitlines():
+        stripped = line.strip()
+
+        # Skip comments and empty lines
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        # Skip -r, -c, and other directive lines
+        if stripped.startswith("-") and not stripped.startswith("-"):
+            continue
+
+        is_dev = False
+        # Handle -r include (mark as dev since usually dev-only)
+        if stripped.startswith("-r "):
+            continue
+
+        dep = _parse_requirement_line(stripped, source_file, is_dev=False)
+        if dep:
+            deps.append(dep)
+
+    return deps
+
+
+def _parse_package_json_deps(content: str, source_file: str) -> list[DependencyInfo]:
+    """Parse dependencies from package.json."""
+    deps: list[DependencyInfo] = []
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return deps
+
+    # Parse production dependencies
+    for name, version in data.get("dependencies", {}).items():
+        deps.append(DependencyInfo(
+            name=name,
+            version=_extract_version(version),
+            source_file=source_file,
+            is_dev=False,
+            is_optional=False
+        ))
+
+    # Parse dev dependencies
+    for name, version in data.get("devDependencies", {}).items():
+        deps.append(DependencyInfo(
+            name=name,
+            version=_extract_version(version),
+            source_file=source_file,
+            is_dev=True,
+            is_optional=False
+        ))
+
+    # Parse optional dependencies
+    for name, version in data.get("optionalDependencies", {}).items():
+        deps.append(DependencyInfo(
+            name=name,
+            version=_extract_version(version),
+            source_file=source_file,
+            is_dev=False,
+            is_optional=True
+        ))
+
+    return deps
+
+
+def _parse_requirement_line(line: str, source_file: str, is_dev: bool) -> DependencyInfo | None:
+    """Parse a single requirement line into DependencyInfo."""
+    # Remove comments
+    if "#" in line:
+        line = line.split("#")[0].strip()
+
+    # Skip empty lines
+    if not line:
+        return None
+
+    # Handle package name and version spec
+    # Split on operators, but preserve the operator for version parsing
+    import re
+    match = re.match(r'^([A-Za-z0-9._-]+)([<>=!~^].*)?$', line.strip())
+    if not match:
+        return None
+
+    name = match.group(1).lower().replace("_", "-")
+    version_spec = match.group(2) if match.group(2) else None
+
+    return DependencyInfo(
+        name=name,
+        version=version_spec,
+        source_file=source_file,
+        is_dev=is_dev,
+        is_optional=False
+    )
+
+
+def _extract_version(version_str: str) -> str | None:
+    """Extract version string from various formats."""
+    if not version_str:
+        return None
+
+    # Handle npm version formats: ^1.2.3, ~1.2.3, >=1.2.3, 1.2.3
+    import re
+    match = re.match(r"^[\^~>=<]+(.+)$", version_str.strip())
+    if match:
+        return match.group(1)
+    return version_str
 
 
 def _validate_query(query: str, max_chars: int) -> None:

@@ -3,6 +3,15 @@ from __future__ import annotations
 import sqlite3, os, time, requests
 from pathlib import Path
 
+# Load API keys from keys.env if it exists
+_keys_file = Path(__file__).parent / "keys.env"
+if _keys_file.exists():
+    for line in _keys_file.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, val = line.split("=", 1)
+            os.environ.setdefault(key.strip(), val.strip())
+
 DB = Path.home() / ".repo_guide" / "agent.db"
 DB.parent.mkdir(parents=True, exist_ok=True)
 
@@ -48,17 +57,21 @@ class Cache:
         return hits / total if total > 0 else 0.0
 
 def fallback_model():
+    """Try Groq API first, then fall back to local Ollama."""
     try:
         key = os.environ.get("GROQ_API_KEY")
-        if not key: return "qwen3:8b"
+        if not key:
+            return "qwen3:8b"
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json={"model":"llama3-70b-8192","messages":[{"role":"user","content":"hello"}],"max_tokens":10},
+            json={"model":"qwen/qwen3.8-27b","messages":[{"role":"user","content":"hi"}],"max_tokens":5},
             timeout=5
         )
-        if resp.status_code == 200: return "groq-llama3"
-    except Exception: pass
+        if resp.status_code == 200:
+            return "groq"
+    except Exception:
+        pass
     return "qwen3:8b"
 
 def run_until_goal(context, ollama, settings, question, goal_string="final"):

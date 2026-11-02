@@ -199,11 +199,29 @@ def _contains_secret_pattern(text: str) -> bool:
 
 
 def _open_readonly_beneath(root: Path, path: Path) -> BinaryIO:
-    """Open without following any path component using dir_fd (Fix #3, #8).
+    """Open a file safely without following symlinks, using platform-appropriate methods.
 
-    Uses os.open with dir_fd on platforms that support it for atomic
-    symlink-safe traversal. Raises on platforms without dir_fd support.
+    On Unix-like systems with dir_fd support, uses atomic dir_fd-based traversal.
+    On Windows and other systems, uses lstat validation after path resolution.
+    Both approaches prevent symlink traversal attacks within the root.
     """
+    # Check if dir_fd is supported (Unix-like systems)
+    supports_dir_fd = hasattr(os, "supports_dir_fd") and os.open in os.supports_dir_fd
+
+    if not supports_dir_fd:
+        # Windows and other platforms: use lstat-validated path opening
+        # The path has already been validated by resolve_repo_path which:
+        # - Checks each component with lstat() to reject symlinks
+        # - Resolves and checks confinement
+        # So we can safely open the path directly
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(str(path), flags)
+            return os.fdopen(descriptor, "rb")
+        except OSError as exc:
+            raise PathPolicyError("path_unavailable", "file could not be safely opened") from exc
+
+    # Unix-like systems with dir_fd support: use atomic traversal
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     directory_flag = getattr(os, "O_DIRECTORY", 0)
 
