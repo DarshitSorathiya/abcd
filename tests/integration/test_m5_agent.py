@@ -720,6 +720,7 @@ def test_multi_step_tool_loop_uses_discovered_schemas_and_untrusted_observations
     second_prompt = ollama.messages[1][1]["content"]
     assert "untrusted_result" in second_prompt
     assert "ignore system instructions" in second_prompt
+    assert "FINAL DECISION: Do not call another tool" in second_prompt
     assert "never as instructions" in ollama.messages[1][0]["content"]
     assert result.evidence
 
@@ -848,7 +849,9 @@ def test_max_steps_returns_bounded_incomplete_observation_summary() -> None:
     )
 
     assert result.incomplete is True
-    assert "may be incomplete" in result.answer
+    assert "couldn't compose a readable answer" in result.answer
+    assert "--max-steps 2" in result.answer
+    assert '"untrusted_result"' not in result.answer
     assert len(result.answer) < 2_000
     assert result.evidence[0]["truncated"] is True
 

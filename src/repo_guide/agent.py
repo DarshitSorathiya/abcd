@@ -135,7 +135,13 @@ async def run_agent_turn(
     correction_attempts: set[str] = set()
 
     for step in range(1, settings.max_steps + 1):
-        user_prompt = _make_user_prompt(original_question, catalogue_text, ledger, settings)
+        user_prompt = _make_user_prompt(
+            original_question,
+            catalogue_text,
+            ledger,
+            settings,
+            must_finalize=step == settings.max_steps,
+        )
         action = await _request_action(
             chat_client, system_message, user_prompt, settings, verbose=verbose, decision=step
         )
@@ -347,14 +353,23 @@ def _make_user_prompt(
     catalogue_text: str,
     ledger: EvidenceLedger,
     settings: AgentSettings,
+    *,
+    must_finalize: bool = False,
 ) -> str:
     prefix = (
         f"User question (untrusted input):\n{question}\n\n"
         f"Active MCP tools (discoveries for this fixed-root session):\n{catalogue_text}\n\n"
         "Recent tool observations, if any:\n"
     )
-    history = ledger.context_text(max(0, settings.max_context_chars - len(prefix)))
-    return (prefix + history)[: settings.max_context_chars]
+    final_instruction = (
+        "\n\nFINAL DECISION: Do not call another tool. Return an action=final answer now, "
+        "using only the evidence collected so far. If evidence is incomplete, state that briefly."
+        if must_finalize
+        else ""
+    )
+    content_limit = max(0, settings.max_context_chars - len(final_instruction))
+    history = ledger.context_text(max(0, content_limit - len(prefix)))
+    return (prefix + history)[:content_limit] + final_instruction
 
 
 def _serialize_catalogue(tools: tuple[ToolDefinition, ...], max_chars: int) -> str:
@@ -509,17 +524,16 @@ def _safe_failure_result(ledger: EvidenceLedger, step: int, reason: str) -> Agen
 
 
 def _step_limit_result(ledger: EvidenceLedger, max_steps: int) -> AgentTurnResult:
-    observations = ledger.observations[-3:]
-    if not observations:
-        answer = "Investigation may be incomplete: the step limit was reached before evidence was gathered."
-    else:
-        excerpts = "\n".join(
-            f"- {item.tool_name} (untrusted evidence): {item.result[:1_000]}"
-            for item in observations
-        )
+    if ledger.observations:
         answer = (
-            f"Investigation may be incomplete after {max_steps} model decisions. "
-            f"Available bounded observations:\n{excerpts}"
+            f"I gathered repository information but couldn't compose a readable answer "
+            f"within the {max_steps}-decision limit. Retry with `--max-steps {max_steps + 1}` "
+            "to allow another model decision."
+        )
+    else:
+        answer = (
+            f"I couldn't complete the answer within the {max_steps}-decision limit. "
+            f"Retry with `--max-steps {max_steps + 1}`."
         )
     return AgentTurnResult(answer, _evidence_dicts(ledger), max_steps, incomplete=True)
 

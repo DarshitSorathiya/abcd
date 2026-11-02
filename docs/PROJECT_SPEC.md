@@ -70,7 +70,7 @@ The agent must not rely on resources/prompts being supported; essential behavior
 - Validate model JSON and tool arguments before calls. Unknown tools, invalid args, duplicate identical calls and repeated malformed JSON are handled without an infinite loop.
 - On malformed JSON: one repair attempt, then one short retry, then a friendly error.
 - Empty search: try one or two better terms or use a more relevant tool before concluding.
-- When the step cap is reached, answer only from accumulated evidence and disclose possible incompleteness.
+- Reserve the final allowed model decision for a final answer: explicitly instruct the model not to call another tool and to disclose evidence gaps. If it still requests a tool, return a concise, readable step-limit message; never dump serialized observations as the user-facing answer.
 - After a successful `repo_overview` tool call, automatically read at most the first 20 lines of a top-level README, when present and when `read_file` is available, so overview answers can cite actual current-turn source lines without another model decision.
 - General knowledge questions can be answered without repository calls. Out-of-scope edit/run/delete/build requests are politely declined.
 - Keep only a compact evidence summary in the active context. Never append complete files or an unbounded conversation.
