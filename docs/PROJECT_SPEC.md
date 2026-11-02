@@ -35,7 +35,7 @@ The root is fixed for the process lifetime. No MCP tool accepts a root or lets t
 Package uses `pyproject.toml` with console entry points:
 
 - `repo-guide-mcp`: `--repo PATH`, `--allow-non-git`, `--verbose`, `--version`.
-- `repo-guide`: optional repo path plus `--model`, `--max-steps` (default 2), `--verbose`, `--version`. Verbose mode enables diagnostics in the CLI's internally launched MCP child; it does not connect the CLI to a separately launched server.
+- `repo-guide`: optional repo path plus `--model`, `--max-steps` (default 2), `--verbose`, `--no-verify`, `--version`. Verification is enabled by default; `--no-verify` prints the model answer without citation/provenance checks or grounding reflection and warns that repository claims are unchecked. Verbose mode enables diagnostics in the CLI's internally launched MCP child; it does not connect the CLI to a separately launched server.
 
 Install into a virtual environment for development; document pipx/uv for isolated user installs. The command must work outside the project directory. The CLI agent launches its child server with the same interpreter (`sys.executable -m repo_guide.server --repo ...`) and fixed arguments, adding `--verbose` when requested. Never rely on shell activation. Document absolute executable paths for IDEs where PATH differs.
 
@@ -71,6 +71,7 @@ The agent must not rely on resources/prompts being supported; essential behavior
 - On malformed JSON: one repair attempt, then one short retry, then a friendly error.
 - Empty search: try one or two better terms or use a more relevant tool before concluding.
 - When the step cap is reached, answer only from accumulated evidence and disclose possible incompleteness.
+- After a successful `repo_overview` tool call, automatically read at most the first 20 lines of a top-level README, when present and when `read_file` is available, so overview answers can cite actual current-turn source lines without another model decision.
 - General knowledge questions can be answered without repository calls. Out-of-scope edit/run/delete/build requests are politely declined.
 - Keep only a compact evidence summary in the active context. Never append complete files or an unbounded conversation.
 
@@ -82,7 +83,7 @@ Citation existence is not proof that a claim is semantically supported. Maintain
 
 ## 9. LLM and HTTP behavior
 
-- Ollama runs locally by default; model name is configurable, never embedded across code. Set bounded request timeouts and response-size limits. Check process/model availability only when a CLI answer is requested, not when the MCP server starts.
+- Ollama runs locally by default; model name is configurable, never embedded across code. Set bounded request timeouts and response-size limits; require finite connection timeouts up to 60 seconds and read timeouts up to 600 seconds. Check process/model availability only when a CLI answer is requested, not when the MCP server starts.
 - Setting `GROQ_API_KEY` opts the CLI into the fixed Groq HTTPS chat endpoint; `GROQ_MODEL` selects its model, defaulting to `qwen/qwen3.8-27b`.
 - Setting `GEMINI_API_KEY` opts the CLI into Google's fixed Gemini `streamGenerateContent` HTTPS endpoint; `GEMINI_MODEL` selects its model, defaulting to `gemini-3.8-flash`. Send the key only in the `x-goog-api-key` header, request JSON output over server-sent events, cap requests/responses and timeouts, and do not follow redirects.
 - For Gemini 3 models, set `generationConfig.thinkingConfig.thinkingLevel` to `low` to avoid the documented high-thinking default latency. CLI verbose mode reports request start, first streamed response data, and elapsed completion time without logging prompt or response contents. Keep the final JSON action buffered and validated before use.

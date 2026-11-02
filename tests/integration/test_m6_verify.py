@@ -7,6 +7,7 @@ import contextlib
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -573,3 +574,160 @@ def test_cli_agent_final_path_verifies_before_return_and_records_report(
     assert result.verification_report.citation_validity_rate_after == 1.0
     assert result.verification_report.reflection_attempted
     assert len(ollama.messages) == 3
+
+
+def test_run_turn_no_verify_returns_model_answer_without_verifier(
+    repo: RootContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeMcp:
+        async def list_tools(self, *, cursor: str | None = None) -> Any:
+            del cursor
+            return SimpleNamespace(tools=[], next_cursor=None)
+
+    @contextlib.asynccontextmanager
+    async def fake_client(parameters: Any):
+        assert parameters.command
+        yield FakeMcp()
+
+    async def fake_agent_turn(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        return agent_module.AgentTurnResult(
+            "Unverified model answer.",
+            (),
+            1,
+            incomplete=True,
+        )
+
+    async def unexpected_verification(*args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        raise AssertionError("verification must be skipped when explicitly disabled")
+
+    monkeypatch.setattr(agent_module, "Client", fake_client)
+    monkeypatch.setattr(agent_module, "run_agent_turn", fake_agent_turn)
+    monkeypatch.setattr(agent_module, "verify_and_reflect", unexpected_verification)
+
+    result = asyncio.run(
+        agent_module._run_turn_with_server(
+            repo,
+            FakeOllama([]),
+            "Tell me about this repository",
+            AgentSettings(),
+            verify=False,
+        )
+    )
+
+    assert result.answer == "Unverified model answer."
+    assert result.incomplete
+    assert result.verification_report is None
+
+
+def test_gemini_repo_overview_reads_citable_readme_lines(
+    repo: RootContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    read_file_schema = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "start_line": {"type": "integer"},
+            "end_line": {"type": "integer"},
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    }
+
+    class FakeGemini(FakeOllama):
+        provider = "gemini"
+
+    class FakeMcp:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        async def list_tools(self, *, cursor: str | None = None) -> Any:
+            assert cursor is None
+            return SimpleNamespace(
+                tools=[
+                    SimpleNamespace(
+                        name="repo_overview",
+                        description="Repository overview",
+                        input_schema={
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                    ),
+                    SimpleNamespace(
+                        name="read_file",
+                        description="Read a repository file",
+                        input_schema=read_file_schema,
+                    ),
+                ],
+                next_cursor=None,
+            )
+
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            self.calls.append((name, arguments))
+            if name == "repo_overview":
+                return SimpleNamespace(
+                    structured_content={
+                        "languages": {"Python": 1},
+                        "readme_present": True,
+                        "top_level_entries": [{"path": "README.md", "kind": "file"}],
+                        "likely_entry_points": [],
+                        "truncated": False,
+                    },
+                    content=[],
+                    is_error=False,
+                )
+            assert name == "read_file"
+            return SimpleNamespace(
+                structured_content={
+                    "path": "README.md",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "total_lines": 1,
+                    "lines": [{"number": 1, "text": "Repository overview"}],
+                },
+                content=[],
+                is_error=False,
+            )
+
+    mcp = FakeMcp()
+
+    @contextlib.asynccontextmanager
+    async def fake_client(parameters: Any):
+        assert parameters.command
+        yield mcp
+
+    monkeypatch.setattr(agent_module, "Client", fake_client)
+    gemini = FakeGemini(
+        [
+            json.dumps({"action": "repo_overview", "args": {}}),
+            json.dumps(
+                {
+                    "action": "final",
+                    "answer": "The project overview is described in `README.md:1`.",
+                }
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        agent_module._run_turn_with_server(
+            repo,
+            gemini,
+            "Tell me about the overview of this repo",
+            AgentSettings(),
+        )
+    )
+
+    assert mcp.calls == [
+        ("repo_overview", {}),
+        ("read_file", {"path": "README.md", "start_line": 1, "end_line": 20}),
+    ]
+    assert result.answer == "The project overview is described in `README.md:1`."
+    assert result.verification_report is not None
+    assert result.verification_report.safe_to_display
+    assert result.verification_report.citation_validity_rate_after == 1.0
+    assert len(gemini.messages) == 2

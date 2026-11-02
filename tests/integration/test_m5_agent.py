@@ -17,7 +17,7 @@ import requests
 import repo_guide.agent as agent_module
 import repo_guide.ollama_client as ollama_module
 from repo_guide.config import DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_MODEL, AgentSettings
-from repo_guide.errors import AgentError
+from repo_guide.errors import AgentError, ConfigurationError
 from repo_guide.evidence import EvidenceLedger
 from repo_guide.gemini_client import GeminiClient
 from repo_guide.groq_client import GroqClient
@@ -159,7 +159,10 @@ def test_ollama_client_posts_non_streaming_json_to_local_api() -> None:
     assert content == '{"action":"final","answer":"ok"}'
     assert request["json"]["model"] == settings.model
     assert request["json"]["stream"] is False
-    assert request["timeout"] == (5.0, 120.0)
+    assert request["timeout"] == (
+        settings.connect_timeout_seconds,
+        settings.read_timeout_seconds,
+    )
     assert request["allow_redirects"] is False
     assert request["verify"] is True
     assert session.calls[0][1]["json"]["options"]["num_predict"] == settings.max_output_tokens
@@ -183,7 +186,10 @@ def test_groq_client_posts_bounded_json_chat_to_hosted_api() -> None:
     assert request["json"]["response_format"] == {"type": "json_object"}
     assert request["json"]["max_completion_tokens"] == settings.max_output_tokens
     assert request["headers"]["Authorization"] == "Bearer test-api-key"
-    assert request["timeout"] == (5.0, 120.0)
+    assert request["timeout"] == (
+        settings.connect_timeout_seconds,
+        settings.read_timeout_seconds,
+    )
     assert request["allow_redirects"] is False
     assert request["verify"] is True
     client.close()
@@ -233,7 +239,10 @@ def test_gemini_client_posts_bounded_json_chat_to_google_api() -> None:
         "responseMimeType": "application/json",
         "thinkingConfig": {"thinkingLevel": "low"},
     }
-    assert request["timeout"] == (5.0, 120.0)
+    assert request["timeout"] == (
+        settings.connect_timeout_seconds,
+        settings.read_timeout_seconds,
+    )
     assert request["allow_redirects"] is False
     assert request["verify"] is True
     assert callbacks == [True]
@@ -621,12 +630,19 @@ def test_gemini_verbose_request_reports_wait_and_completion(
     captured = capsys.readouterr()
     assert action.answer == "ok"
     assert "gemini request 2 started" in captured.err
-    assert "read timeout is 120s between chunks" in captured.err
+    expected_timeout = fake_settings().read_timeout_seconds
+    assert f"read timeout is {expected_timeout:g}s between chunks" in captured.err
     assert "gemini request 2 finished after" in captured.err
 
 
 def test_default_model_decision_budget_is_two() -> None:
     assert AgentSettings().max_steps == 2
+
+
+@pytest.mark.parametrize("timeout", [1_000_000.0, 1e13, float("inf"), float("nan")])
+def test_agent_settings_reject_unbounded_read_timeouts(timeout: float) -> None:
+    with pytest.raises(ConfigurationError, match="read timeout at most 600 seconds"):
+        AgentSettings(read_timeout_seconds=timeout)
 
 
 def test_dynamic_tool_discovery_supports_pagination() -> None:
@@ -949,6 +965,38 @@ def test_cli_interactive_empty_input_eof_stdout_and_stderr_separation(
     assert "root=" in captured.err and "mode=reduced" in captured.err and "model=" in captured.err
     assert "Question>" in captured.err
     assert verbose_values == [True, True]
+    assert fake_ollama.closed
+
+
+def test_cli_no_verify_warns_and_passes_option_to_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    context = RootContext(tmp_path.resolve(), RootMode.REDUCED)
+    fake_ollama = FakeOllama([])
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(agent_module, "resolve_root", lambda *args, **kwargs: context)
+    monkeypatch.setattr(agent_module, "OllamaClient", lambda settings: fake_ollama)
+    monkeypatch.setattr(agent_module.sys, "stdin", io.StringIO("question\n"))
+    verify_values: list[bool] = []
+
+    def fake_run(awaitable: Any) -> Any:
+        frame = getattr(awaitable, "cr_frame", None)
+        assert frame is not None
+        verify_values.append(frame.f_locals["verify"])
+        awaitable.close()
+        return agent_module.AgentTurnResult("raw answer", (), 1)
+
+    monkeypatch.setattr(agent_module.asyncio, "run", fake_run)
+
+    assert agent_module.main(["--allow-non-git", "--no-verify"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == "raw answer\n"
+    assert "answer verification disabled" in captured.err
+    assert verify_values == [False]
     assert fake_ollama.closed
 
 

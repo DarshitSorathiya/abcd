@@ -16,7 +16,7 @@ This pack gives GitHub Copilot the project contract, architecture, security mode
 
 ## Product in one paragraph
 
-Repo Guide is a local, read-only repository onboarding agent. It uses a Python MCP server to expose bounded tools for repository tree/file/search/history and public GitHub issues; a separate CLI agent uses local Ollama by default, or the hosted Groq/Gemini API when configured, to choose tools, observe results, and stop when it has evidence. Final repository claims cite repository-relative `path:line` locations or commit hashes. Programmatic verification rejects invalid citations before output. MCP clients such as VS Code Copilot Chat and MCP Inspector can launch the same server independently; they use their own model. The CLI agent does not run inside Copilot Chat.
+Repo Guide is a local, read-only repository onboarding agent. It uses a Python MCP server to expose bounded tools for repository tree/file/search/history and public GitHub issues; a separate CLI agent uses local Ollama by default, or the hosted Groq/Gemini API when configured, to choose tools, observe results, and stop when it has evidence. By default, final repository claims are checked against repository-relative `path:line` locations or commit hashes before output; `--no-verify` explicitly disables those checks and prints the model answer directly. MCP clients such as VS Code Copilot Chat and MCP Inspector can launch the same server independently; they use their own model. The CLI agent does not run inside Copilot Chat.
 
 ## Current protocol note (verified 21 Oct 2026)
 

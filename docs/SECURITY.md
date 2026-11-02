@@ -63,6 +63,7 @@ Deny `.git/**`, `.env*`, private/public key files where likely credentials are s
 ### Citation integrity
 
 - Citation verification is deterministic and runs before output.
+- The CLI's explicit `--no-verify` opt-out skips citation/provenance verification and grounding reflection. Warn at startup that repository claims are unchecked; retain verification by default in all other interfaces.
 - Resolve each cited path under the same root and same denylist; verify the exact line/range; verify commit hashes against local history; normalize snippets and compare against actual content.
 - Maintain an evidence ledger. Citations existing is not sufficient evidence that a claim is supported; unsupported claims must be removed or marked unknown.
 - Test `../`, absolute/drive/UNC paths, symlink escape, invalid line/range, deleted file, misleading filenames, malformed commit hashes and fake snippets.

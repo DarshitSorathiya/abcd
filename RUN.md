@@ -31,7 +31,15 @@ The CLI does not load credentials from `keys.env` or other repository files. Nev
 
 `GEMINI_MODEL` selects the Gemini model (default `gemini-3.8-flash`). The standard CLI defaults to two model decisions per question. Hosted providers receive the question and repository excerpts; verify the startup provider/model before asking repository questions. Groq may reject requests with HTTP 429 when an organization-level rate or usage limit is reached.
 
-Gemini requests use Google's streamed `streamGenerateContent` endpoint; the CLI still waits for the complete JSON action before using it. Gemini 3 requests use Google's documented `low` thinking level to reduce first-token latency. With `--verbose`, the CLI reports when each request starts, when response data first arrives, and when the request finishes. The configured read timeout is an inactivity limit between response chunks, not a total request deadline; diagnostics never expose prompt content, responses, or credentials.
+Gemini requests use Google's streamed `streamGenerateContent` endpoint; the CLI still waits for the complete JSON action before using it. Gemini 3 requests use Google's documented `low` thinking level to reduce first-token latency. With `--verbose`, the CLI reports when each request starts, when response data first arrives, and when the request finishes. The read timeout is a finite inactivity limit between response chunks (maximum 600 seconds), not a total request deadline; diagnostics never expose prompt content, responses, or credentials.
+
+Answer verification is enabled by default. To print model answers directly without citation/provenance checks, pass `--no-verify`:
+
+```powershell
+repo-guide --provider gemini --verbose --no-verify
+```
+
+This opt-out also skips the secondary grounding reflection. Repository-specific claims and citations in that mode are unchecked and may be unsupported or incorrect.
 
 SQLite memory/cache helpers and `custom_server.py` are experimental, are not used by the standard commands, and should not be treated as an API-cost optimization. Their behavior and limitations are documented in the complete guide.
 

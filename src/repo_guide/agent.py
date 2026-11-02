@@ -220,6 +220,14 @@ async def run_agent_turn(
                 is_error=bool(getattr(result, "is_error", False)),
                 max_observation_chars=settings.max_observation_chars,
             )
+            if tool.name == "repo_overview" and not bool(getattr(result, "is_error", False)):
+                await _record_overview_readme(
+                    client,
+                    catalogue,
+                    result,
+                    settings,
+                    ledger,
+                )
 
     return _step_limit_result(ledger, settings.max_steps)
 
@@ -387,6 +395,84 @@ def _tool_result_payload(result: Any, max_chars: int) -> dict[str, Any]:
     return {"is_error": is_error, "untrusted_result": text, "truncated": truncated}
 
 
+async def _record_overview_readme(
+    client: Any,
+    catalogue: tuple[ToolDefinition, ...],
+    overview_result: Any,
+    settings: AgentSettings,
+    ledger: EvidenceLedger,
+) -> None:
+    """Read a small README excerpt so overview answers have citable source lines."""
+    structured = getattr(overview_result, "structured_content", None)
+    if not isinstance(structured, dict):
+        return
+    overview = cast(dict[str, Any], structured)
+    raw_entries = overview.get("top_level_entries")
+    if not isinstance(raw_entries, list):
+        return
+    entries = cast(list[Any], raw_entries)
+    readme_path: str | None = None
+    for raw_entry in entries:
+        if not isinstance(raw_entry, dict):
+            continue
+        entry = cast(dict[str, Any], raw_entry)
+        path = entry.get("path")
+        if (
+            entry.get("kind") == "file"
+            and isinstance(path, str)
+            and "/" not in path
+            and "\\" not in path
+            and path.casefold().startswith("readme")
+        ):
+            readme_path = path
+            break
+    if readme_path is None:
+        return
+
+    read_file = next((item for item in catalogue if item.name == "read_file"), None)
+    if read_file is None:
+        return
+    arguments = {"path": readme_path, "start_line": 1, "end_line": 20}
+    validation_error = _validate_tool_arguments(read_file, arguments)
+    if validation_error is not None:
+        ledger.record(
+            "agent_validation",
+            {"tool": "read_file"},
+            {"error": "invalid_readme_arguments", "message": validation_error},
+            is_error=True,
+        )
+        return
+    try:
+        result = await asyncio.wait_for(
+            client.call_tool(read_file.name, arguments),
+            timeout=settings.tool_timeout_seconds,
+        )
+    except asyncio.CancelledError:
+        raise
+    except asyncio.TimeoutError:
+        ledger.record(
+            read_file.name,
+            arguments,
+            {"error": "tool_timeout", "message": "MCP tool call exceeded its time limit."},
+            is_error=True,
+        )
+    except Exception:
+        ledger.record(
+            read_file.name,
+            arguments,
+            {"error": "mcp_call_failed", "message": "MCP tool call failed or disconnected."},
+            is_error=True,
+        )
+    else:
+        ledger.record(
+            read_file.name,
+            arguments,
+            _tool_result_payload(result, settings.max_observation_chars),
+            is_error=bool(getattr(result, "is_error", False)),
+            max_observation_chars=settings.max_observation_chars,
+        )
+
+
 def _record_correction(
     attempts: set[str],
     signature: str,
@@ -471,6 +557,7 @@ async def _run_turn_with_server(
     settings: AgentSettings,
     *,
     verbose: bool = False,
+    verify: bool = True,
 ) -> AgentTurnResult:
     parameters = build_server_parameters(context, verbose=verbose)
     async with Client(parameters) as client:
@@ -483,6 +570,13 @@ async def _run_turn_with_server(
             tools=catalogue,
             verbose=verbose,
         )
+        if not verify:
+            return AgentTurnResult(
+                candidate.answer,
+                candidate.evidence,
+                candidate.steps,
+                candidate.incomplete,
+            )
         report = await verify_and_reflect(
             context,
             question,
@@ -537,6 +631,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--verbose",
         action="store_true",
         help="show non-sensitive CLI and MCP tool diagnostics on stderr",
+    )
+    parser.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="print model answers without citation or provenance verification",
     )
     parser.add_argument("--version", action="version", version=f"repo-guide {__version__}")
     args = parser.parse_args(argv)
@@ -615,6 +714,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.allow_remote_ollama and provider == "ollama":
         print("repo-guide: remote Ollama endpoint explicitly enabled", file=sys.stderr, flush=True)
+    if args.no_verify:
+        print(
+            "repo-guide: answer verification disabled; repository claims and citations are unchecked",
+            file=sys.stderr,
+            flush=True,
+        )
 
     exit_code = 0
     try:
@@ -633,7 +738,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 result = asyncio.run(
                     _run_turn_with_server(
-                        context, chat_client, question, settings, verbose=args.verbose
+                        context,
+                        chat_client,
+                        question,
+                        settings,
+                        verbose=args.verbose,
+                        verify=not args.no_verify,
                     )
                 )
             except KeyboardInterrupt:

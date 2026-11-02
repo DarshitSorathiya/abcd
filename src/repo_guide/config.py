@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from repo_guide.errors import ConfigurationError
@@ -20,7 +21,7 @@ class AgentSettings:
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
     allow_remote_ollama: bool = False
     connect_timeout_seconds: float = 5.0
-    read_timeout_seconds: float = 180.0
+    read_timeout_seconds: float = 600.0
     max_request_bytes: int = 256_000
     max_response_bytes: int = 256_000
     max_output_tokens: int = 1_024
@@ -35,8 +36,16 @@ class AgentSettings:
             raise ConfigurationError("invalid_model", "model name must contain 1 to 200 characters")
         if not self.ollama_base_url:
             raise ConfigurationError("invalid_ollama_url", "Ollama base URL is required")
-        if self.connect_timeout_seconds <= 0 or self.read_timeout_seconds <= 0:
-            raise ConfigurationError("invalid_limit", "Ollama timeouts must be positive")
+        if (
+            not math.isfinite(self.connect_timeout_seconds)
+            or not math.isfinite(self.read_timeout_seconds)
+            or not 0 < self.connect_timeout_seconds <= 60
+            or not 0 < self.read_timeout_seconds <= 600
+        ):
+            raise ConfigurationError(
+                "invalid_limit",
+                "connect timeout must be at most 60 seconds and read timeout at most 600 seconds",
+            )
         if min(
             self.max_request_bytes,
             self.max_response_bytes,

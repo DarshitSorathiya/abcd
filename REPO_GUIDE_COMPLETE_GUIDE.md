@@ -4,9 +4,9 @@ This guide describes the checked-in implementation, not just the intended design
 
 ### Run
 
-# terminal - 1
+# Optional: standalone MCP server for an IDE client; the CLI below starts its own child server
 `
-python -m pip install -e ".[dev]"
+pip install -e ".[dev]"
 
 repo-guide-mcp --repo . --verbose
 
@@ -18,7 +18,7 @@ $secureKey = Read-Host "Gemini API key" -AsSecureString
 $env:GEMINI_API_KEY = [System.Net.NetworkCredential]::new("", $secureKey).Password
 $env:GEMINI_MODEL = "gemini-3.8-flash"
 
-python -m pip install -e ".[dev]"
+pip install -e ".[dev]"
 
 repo-guide --provider gemini --verbose
 
@@ -28,18 +28,19 @@ repo-guide --provider gemini --verbose
 
 1. [What Repo Guide is for](#what-repo-guide-is-for)
 2. [What it can and cannot do](#what-it-can-and-cannot-do)
-3. [Ways to install and run it](#ways-to-install-and-run-it)
-4. [Can I use a repository URL without cloning?](#can-i-use-a-repository-url-without-cloning)
-5. [Branches, read-only behavior, and security boundaries](#branches-read-only-behavior-and-security-boundaries)
-6. [User flow and process architecture](#user-flow-and-process-architecture)
-7. [Data flow for a CLI question](#data-flow-for-a-cli-question)
-8. [MCP tools, resources, and prompt](#mcp-tools-resources-and-prompt)
-9. [Module and file reference](#module-and-file-reference)
-10. [SQLite memory and cache: current behavior and limitations](#sqlite-memory-and-cache-current-behavior-and-limitations)
-11. [IDE integration](#ide-integration)
-12. [Configuration reference](#configuration-reference)
-13. [Limits, failure modes, and edge cases](#limits-failure-modes-and-edge-cases)
-14. [Tests and maintenance](#tests-and-maintenance)
+3. [Example prompts](#example-prompts)
+4. [Ways to install and run it](#ways-to-install-and-run-it)
+5. [Can I use a repository URL without cloning?](#can-i-use-a-repository-url-without-cloning)
+6. [Branches, read-only behavior, and security boundaries](#branches-read-only-behavior-and-security-boundaries)
+7. [User flow and process architecture](#user-flow-and-process-architecture)
+8. [Data flow for a CLI question](#data-flow-for-a-cli-question)
+9. [MCP tools, resources, and prompt](#mcp-tools-resources-and-prompt)
+10. [Module and file reference](#module-and-file-reference)
+11. [SQLite memory and cache: current behavior and limitations](#sqlite-memory-and-cache-current-behavior-and-limitations)
+12. [IDE integration](#ide-integration)
+13. [Configuration reference](#configuration-reference)
+14. [Limits, failure modes, and edge cases](#limits-failure-modes-and-edge-cases)
+15. [Tests and maintenance](#tests-and-maintenance)
 
 ## What Repo Guide is for
 
@@ -52,7 +53,7 @@ Repo Guide is a local repository-onboarding assistant. It can help a contributor
 - returning a small public GitHub issue listing when a supported GitHub remote is configured;
 - producing a bounded structural overview and candidate entry points.
 
-The CLI agent can use an Ollama model on the local machine or, when explicitly configured with `GROQ_API_KEY`, Groq's hosted chat API to choose which read-only repository tools to call. It then verifies repository citations before displaying repository-specific claims.
+The CLI agent can use local Ollama or explicitly selected hosted Groq/Gemini models to choose which read-only repository tools to call. Answers are citation-verified by default; `--no-verify` is an explicit opt-out that prints the model answer without citation/provenance checks.
 
 This project is useful when someone needs a quick, evidence-linked orientation to an unfamiliar codebase. It is not a code reviewer, a build system, a source-control client, a security certification, or a replacement for maintainers. It searches text and reads files; it does not understand every program semantically and does not run the repository's code.
 
@@ -71,9 +72,62 @@ The canonical behavior and security contracts are in [PROJECT_SPEC.md](./PROJECT
 | Edit files, commit, push, switch branches, or change Git state | No. |
 | Open a GitHub URL as a remote repository source | No. A local checkout or directory is required. |
 | Use the CLI agent inside Copilot Chat/Cursor | No. IDE clients launch the MCP server and use their own model. |
-| Guarantee that every model claim is semantically correct | No. Citation checks prove bounded properties about citations and evidence provenance, not full semantic truth. |
-| Prevent every possible data disclosure | No. Hosted Groq receives the question and repository excerpts sent in prompts. IDE clients may send tool results to the model configured in that IDE. |
+| Guarantee that every model claim is semantically correct | No. Citation checks prove bounded properties about citations and evidence provenance, not full semantic truth. `--no-verify` turns even those checks off. |
+| Prevent every possible data disclosure | No. Hosted Groq/Gemini receive the question and repository excerpts sent in prompts. IDE clients may send tool results to the model configured in that IDE. |
 | Use SQLite memory/cache in the standard `repo-guide` command | No. Those helpers are not wired into the standard CLI flow. |
+
+## Example prompts
+
+Type a natural-language question at the `Question>` prompt. There is no special prompt syntax. Ask focused questions and name a file, symbol, date range, or label when you already know one; Repo Guide will choose from its discovered read-only tools.
+
+### Repository orientation
+
+```text
+Give me an overview of this repository.
+Show me the top-level folders and likely entry points.
+What does the README say this project is for?
+Where should a new contributor start reading?
+```
+
+### Find and understand code
+
+```text
+Where is the configuration loaded? Search for the configuration class and cite the relevant lines.
+Find the definition of `resolve_root` and explain what it validates.
+Read the first 40 lines of `src/repo_guide/agent.py` and summarize its role.
+Search tracked files for `GEMINI_API_KEY`; show the matching paths and lines.
+```
+
+### Local history
+
+```text
+Show the 10 most recent commits.
+What changed in `src/repo_guide/agent.py` recently?
+Find commits from the last month whose message mentions timeout.
+```
+
+History questions require a Git checkout with usable local history. Repo Guide does not fetch remote history.
+
+### Public GitHub issues
+
+```text
+List the five newest open issues.
+Show open issues labeled `good first issue`.
+Are there any open issues labeled `bug`?
+```
+
+Issue lookup requires a supported public `github.com` remote and network access. It returns issue metadata, not issue bodies.
+
+### General and out-of-scope requests
+
+```text
+What is an MCP server?                         # General concept; may not inspect this repo.
+What is the difference between HTTP and HTTPS? # General concept; may not inspect this repo.
+Run the test suite.                            # Unsupported: Repo Guide does not execute commands.
+Edit the README to add setup instructions.     # Unsupported: Repo Guide does not modify files.
+```
+
+General conceptual questions can be answered without repository evidence. Requests to edit/delete files, run tests/builds, or execute commands are declined; use your normal development tools for those tasks. Repo Guide also has no general web search, so avoid relying on it for live external information.
 
 ## Ways to install and run it
 
@@ -186,9 +240,11 @@ The home directory and filesystem root are refused as roots. Bare Git repositori
 
 ### Choose the CLI model provider
 
-Without a non-empty `GROQ_API_KEY`, the standard CLI defaults to Ollama at `http://127.0.0.1:11434`, using `qwen3:8b` by default. Ollama must be running and that model must already be installed.
+In `auto` mode, provider selection prefers Groq when `GROQ_API_KEY` is set, then Gemini when `GEMINI_API_KEY` is set, and otherwise Ollama at `http://127.0.0.1:11434` using `qwen3:8b`. Ollama must be running and that model must already be installed.
 
-When `GROQ_API_KEY` is present in the CLI process environment, provider selection defaults to Groq. The default Groq model is `qwen/qwen3.8-27b`; `GROQ_MODEL` or `--model` can override it. The CLI explicitly announces that Groq receives the question and repository excerpts. A new API key does not reset Groq account quota or rate limits.
+When `GROQ_API_KEY` is present in the CLI process environment, auto mode selects Groq ahead of Gemini. The default Groq model is `qwen/qwen3.8-27b`; `GROQ_MODEL` or `--model` can override it. The CLI announces that Groq receives the question and repository excerpts. A new API key does not reset Groq account quota or rate limits.
+
+When Groq is not selected and `GEMINI_API_KEY` is set, auto mode selects Gemini. The default model is `gemini-3.8-flash`; `GEMINI_MODEL` or `--model` can override it. Use `--provider gemini` to select Gemini explicitly. The CLI announces that prompts and repository excerpts are sent to Google.
 
 For PowerShell, enter a Groq key without putting it into a command, source file, or repository-local `.env` file:
 
@@ -211,11 +267,13 @@ repo-guide --help
 repo-guide --version
 repo-guide --repo . --provider ollama --model qwen3:8b
 repo-guide --repo . --provider groq --model qwen/qwen3.8-27b
+repo-guide --repo . --provider gemini --model gemini-3.8-flash
 repo-guide --repo . --max-steps 2
+repo-guide --repo . --no-verify
 repo-guide-mcp --repo . --verbose
 ```
 
-The default maximum is four model decisions per question (lower than the original eight-step default to reduce hosted-model requests). `--max-steps` accepts a bounded value up to 32. Lowering it can reduce requests but may leave a complex answer incomplete. A single decision may still fail with HTTP 429 when the Groq account/model limit is exhausted. No client-side setting can override provider-side quota.
+The default maximum is two model decisions per question. `--max-steps` accepts a bounded value up to 32. Lowering it can reduce requests but may leave a complex answer incomplete. `--no-verify` prints the final answer without citation/provenance checks or reflection; repository claims are unchecked. A single decision may still fail with an HTTP 429 when a hosted provider's account/model limit is exhausted. No client-side setting overrides provider-side quota.
 
 ## Can I use a repository URL without cloning?
 
@@ -265,13 +323,13 @@ The full threat model and adversarial cases are in [SECURITY.md](./SECURITY.md).
 ### CLI user flow
 
 1. User starts `repo-guide`, optionally giving `--repo`, provider, model, and step limit.
-2. CLI resolves the root and checks provider configuration. It reports root/mode/provider/model on stderr. If Groq is selected, it warns that questions and retrieved excerpts are sent to Groq.
+2. CLI resolves the root and checks provider configuration. It reports root/mode/provider/model on stderr. For Groq or Gemini, it warns that questions and retrieved excerpts are sent to that hosted provider. `--no-verify` adds a warning that repository claims are unchecked.
 3. User types a question at `Question>`.
 4. For each question, the CLI starts a child MCP server in stdio mode using the same Python interpreter and the already-resolved root.
-5. The client discovers the server's tools instead of assuming tool schemas.
-6. The model returns one JSON action: either call a discovered read-only tool with arguments or return a final answer.
+5. The client discovers the server's tools instead of assuming tool schemas. No full-repository scan or persistent content cache is built at startup.
+6. The selected model returns one strict JSON action: either call a discovered read-only tool with arguments or return a final answer.
 7. The agent validates the action and arguments, calls the tool if appropriate, stores a bounded observation, and repeats until a final answer or the step limit.
-8. The verifier checks citations against the retrieved evidence and repository. With the standard Groq client, optional LLM reflection is disabled to reduce hosted calls; deterministic citation checks remain enabled. Other providers may use one bounded reflection call.
+8. By default, the verifier checks citations against retrieved evidence and the repository. Groq and Gemini skip optional LLM reflection; Ollama can use one bounded reflection call. With `--no-verify`, the CLI bypasses both reflection and deterministic verification and warns that claims are unchecked.
 9. The CLI prints the answer and returns to `Question>`. EOF or Ctrl-C exits and closes the model client.
 
 ### Process diagram
@@ -282,7 +340,7 @@ CLI user
   v
 repo-guide (agent.py)
   |-- resolves one fixed RootContext (root.py)
-  |-- selects Ollama or Groq chat client
+  |-- selects Ollama, Groq, or Gemini chat client
   |
   +--> child Python process: repo_guide.server (stdio MCP)
   |      |-- discovers tools/resources/prompts (server.py)
@@ -294,7 +352,7 @@ repo-guide (agent.py)
   |
   +--> chat model: tool decision(s), then final answer
   |
-  +--> verify.py: citation/path/line/commit/evidence checks
+  +--> verify.py: citation/path/line/commit/evidence checks (unless --no-verify)
   |
   +--> answer to CLI stdout; diagnostics to stderr
 ```
@@ -332,6 +390,26 @@ The model must return exactly one of these JSON shapes:
 
 The model does not get to select arbitrary programs or paths outside the discovered tools. JSON parsing rejects invalid JSON, duplicate keys, extra/missing fields, and incorrect value types. Tool arguments are checked against the discovered JSON Schema before `call_tool`.
 
+### Worked example: "give me an overview of this repo"
+
+Assume the CLI is running with Gemini selected and verification enabled (the default):
+
+1. **The CLI starts the question turn.** It already resolved and fixed the repository root at startup. When you enter the question, it starts a child MCP server for that root using the same Python interpreter. Starting `repo-guide-mcp` separately is not required and does not provide the server for this CLI turn.
+2. **The MCP client discovers tools.** It asks the child server for its current tool catalogue and schemas. This is a lightweight protocol handshake, not a full repository scan or startup cache.
+3. **The agent checks the request.** Empty/oversized questions are rejected. Requests to edit or delete files, run commands/tests/builds, or execute code are declined locally before a model request. The overview question is allowed and proceeds to Gemini.
+4. **Gemini chooses an action (model decision 1).** The prompt contains the system rules, your question, discovered tool descriptions/schemas, and any observations already gathered in this turn. With Gemini, the CLI sends that data to Google's API; Gemini 3 requests set low thinking and use streamed JSON output. The client buffers the stream until the JSON action is complete and validated.
+5. **The agent validates and calls the tool.** If the action is `repo_overview`, the agent checks that the tool exists and its arguments match the discovered schema. The MCP server computes a bounded structural summary from a shallow tree: language counts, README presence, top-level entries, candidate entry points, and a truncation flag. It does not read or index the whole repository.
+6. **The agent gathers citable README evidence.** After a successful overview result, the agent automatically asks the already-running MCP server to read at most the first 20 lines of a top-level README, if one is listed and `read_file` is available. This is a local tool call, not another Gemini request. Its numbered lines and the overview result are saved in the bounded, turn-local evidence ledger as untrusted repository data.
+7. **Gemini writes the answer (model decision 2).** The agent sends a new prompt containing the question, tool catalogue, overview result, and README excerpt. Gemini returns a final JSON answer. The default CLI maximum is two model decisions; this common path uses one to select the overview tool and one to write the answer. The README read does not consume an extra model decision.
+8. **The CLI handles verification and output.** By default, deterministic verification checks citations against current-turn evidence and the actual repository. Gemini answers do not trigger the optional LLM reflection pass. If verification succeeds, the answer is printed to stdout; diagnostics go to stderr. If a necessary citation is missing or invalid, the verifier may remove unsupported claims or use its safe fallback instead of showing the original answer.
+9. **The turn ends.** The child MCP server is closed after this question. The evidence ledger is not a persistent cache. For the next question, the CLI starts another child server and discovers tools again.
+
+To see request timing, use `--verbose`. To print the final model answer directly, use `--no-verify`; this bypasses both deterministic citation/provenance checks and reflection, and prints a stderr warning that repository claims are unchecked:
+
+```powershell
+repo-guide --provider gemini --verbose --no-verify
+```
+
 ### Evidence and verification
 
 Each tool result is serialized and bounded before entering the turn-scoped evidence ledger. The ledger records tool name, bounded arguments, result, error/truncation flags, and a content fingerprint. It retains a compact context rather than an unbounded transcript and marks repository observations as untrusted data.
@@ -340,9 +418,21 @@ For repository answers, deterministic verification examines repository-relative 
 
 If invalid claims are found, the verifier removes the smallest affected sentence/claim it can safely identify, then verifies remaining citations again. It will not invent replacement citations. If checks fail, it returns a safe fallback instead of presenting the unsupported repository claim as fact.
 
+The interactive CLI has an explicit `--no-verify` opt-out. In this mode, the agent still parses/validates the model action and enforces the read-only MCP tool boundary, but after a final model answer it skips the citation/provenance verifier and the optional reflection call. The answer is printed as returned by the model, with a startup warning that repository claims and citations are unchecked. Programmatic `run_question()` remains verified by default.
+
+### Questions outside the supported scope
+
+- **Requests to change the repository or execute something** (for example, "edit this file", "delete the config", "run the tests", or "build the project") match the CLI's local out-of-scope guard. Repo Guide returns a brief refusal without calling Gemini or MCP tools. The MCP server itself also exposes no write, shell, build, test, or arbitrary execution tool.
+- **General conceptual questions** (for example, "what is a pull request?") can be answered by the selected model without repository tool calls. The answer is general model output, not a fact checked against this checkout.
+- **Unrelated or live-information questions** (for example, current weather or breaking news) are not repository tools/features. The CLI has no general web-search tool; do not treat any model response as current or independently sourced.
+- **Repository questions outside available tools** (for example, asking what a file does when the model has not read it) may require more tool steps or a different question. The agent has a bounded step budget; if exhausted, it reports an incomplete investigation rather than running arbitrary commands.
+- **External/private source requests** are not supported as remote repository access. Use a permitted local checkout. Public GitHub issue metadata is the only supported GitHub lookup, and only through a recognized public GitHub remote.
+- **Invalid or ungrounded repository answers:** by default, citation/provenance verification may sanitize the response or replace it with a safe fallback. `--no-verify` prints the answer as-is but removes that safeguard.
+
 ### Network data
 
 - **Groq:** receives the question, system/tool prompt, and bounded repository observations included in model requests. The key is sent only in the HTTPS authorization header. HTTP 429 can be a transient rate limit or exhausted account/model quota; waiting only helps the former. HTTP 413 indicates a request-size limit. Repo Guide does not retry Groq requests automatically.
+- **Gemini:** receives the question, system/tool prompt, and bounded repository observations included in model requests. Its key is sent in the `x-goog-api-key` header. The CLI uses streamed `streamGenerateContent` for Gemini and does not automatically retry provider errors.
 - **GitHub:** only runs when the issues tool is called. It derives owner/repository from the local Git remote and sends a bounded unauthenticated GET to the fixed API host. It returns issue number/title/labels/canonical URL; issue bodies are not fetched, pull requests are excluded.
 - **Ollama:** receives prompts over the configured local endpoint by default. Remote endpoints are denied unless explicitly opted into with HTTPS.
 
@@ -378,7 +468,7 @@ Clients may not support resources or prompts consistently. The essential CLI age
 | [pyproject.toml](../pyproject.toml) | Package metadata, Python floor, pinned runtime/dev dependencies, entry-point scripts, Ruff/Pyright/Pytest configuration, wheel/sdist inclusion. |
 | [uv.lock](../uv.lock) | Locked dependency resolution for uv installs. Keep it synchronized when manifests change. |
 | [\_\_init\_\_.py](../src/repo_guide/__init__.py) | Package version constant. |
-| [config.py](../src/repo_guide/config.py) | Immutable `AgentSettings` and `SafetyLimits`, default models/endpoint, and validation of numeric/URL-related limits. Standard agent default is four decisions after the hosted-request reduction. |
+| [config.py](../src/repo_guide/config.py) | Immutable `AgentSettings` and `SafetyLimits`, default models/endpoint, and validation of numeric/URL-related limits. The CLI currently defaults to two model decisions per question. |
 | [constants.py](../src/repo_guide/constants.py) | Shared caps for citations, evidence, file/tree/search/history, agent steps, JSON, HTTP, and paths. Some values are legacy/duplicated; when defaults differ, inspect the active `AgentSettings` or `SafetyLimits` consumer. |
 | [errors.py](../src/repo_guide/errors.py) | `RepoGuideError` with stable safe `code` and `message`; `RootResolutionError`, `PathPolicyError`, `ConfigurationError`, and `AgentError` specialize it. `as_dict()` provides a structured safe representation. |
 
@@ -461,17 +551,18 @@ The server is read-only by design. Its process lifetime and root are controlled 
 - `_make_user_prompt()` combines question, discovered catalogue, and bounded evidence context.
 - `_serialize_catalogue()` serializes tools and rejects catalogues above the context cap.
 - `_tool_result_payload()` converts results to bounded JSON-like untrusted data.
+- `_record_overview_readme()` reads at most 20 lines from a top-level README after a successful `repo_overview` call so the final answer can cite actual current-turn lines.
 - `_record_correction()` records one correction attempt per repeated action signature.
 - `_action_signature()` creates a stable JSON signature for loop detection.
 - `_evidence_dicts()` serializes ledger observations for verification.
 - `_safe_failure_result()` and `_step_limit_result()` produce incomplete, evidence-limited outcomes.
 - `_find_repo_guide_error()` finds safe Repo Guide exceptions nested in async task-group errors so useful safe messages can be displayed.
 - `_reject_json_constant()` and `_reject_duplicate_json_keys()` reject non-standard JSON constants and duplicate object keys.
-- `_run_turn_with_server()` launches the child MCP process, discovers tools, runs the agent, and verifies the answer. It disables optional LLM reflection for Groq while preserving deterministic checks.
+- `_run_turn_with_server()` launches the child MCP process, discovers tools, runs the agent, and verifies the answer by default. Groq/Gemini skip optional LLM reflection while preserving deterministic checks; the CLI's explicit `--no-verify` path skips final verification.
 - `run_question()` is the public single-question wrapper shared with evaluation.
-- `main()` parses CLI flags, selects provider/model, reports startup privacy notice, loops over user questions, and closes the client.
+- `main()` parses CLI flags, selects provider/model, reports hosted-provider and optional no-verification notices, loops over user questions, and closes the client.
 
-The question loop can use one model request for each decision, up to four by default (or the configured cap), and some provider/model responses may fail strict JSON validation. The Groq path intentionally does not multiply such failures with repair requests.
+The question loop can use one model request for each decision, up to two by default (or the configured cap), and some provider/model responses may fail strict JSON validation. Hosted Groq/Gemini paths intentionally do not multiply such failures with repair requests.
 
 #### `evidence.py`
 
@@ -489,7 +580,7 @@ The ledger is per-turn memory, not persistent conversation memory and not a resp
 - `Citation`, `CitationFinding`, and `VerificationReport` represent parsed references, their verification status, and final report/metrics.
 - `extract_citations()` finds repository-relative `path:line`/range citations and explicitly named commits, ignoring URL/fenced-example contexts and limiting count.
 - `verify_answer()` deterministically validates citations and sanitizes claims; on verifier failure it returns a safe fallback rather than the original unsupported answer.
-- `verify_and_reflect()` optionally runs one bounded secondary model check for unsupported claims, sanitizes exact claim substrings, and runs deterministic verification again. Groq CLI use currently opts out of this optional request.
+- `verify_and_reflect()` optionally runs one bounded secondary model check for unsupported claims, sanitizes exact claim substrings, and runs deterministic verification again. The standard Groq/Gemini CLI paths skip this optional request. `--no-verify` skips deterministic verification too.
 - `_verify_citations()`, `_verify_file_citation()`, and `_verify_quote()` check evidence provenance, root/sensitive-file policy, line bounds, local commit existence, and quoted content.
 - `_normalize_whitespace()` normalizes quote comparison.
 - `_attributed_quote()` extracts quote text associated with a citation.
@@ -722,10 +813,13 @@ Review the command and root argument before enabling a workspace MCP server. The
 | `GROQ_MODEL` | `repo-guide` | Groq model ID; default `qwen/qwen3.8-27b`. |
 | `REPO_GUIDE_MODEL` | `repo-guide` | Ollama model ID; default `qwen3:8b`. |
 | `OLLAMA_BASE_URL` / `--ollama-url` | `repo-guide` | Ollama origin; loopback HTTP by default. Remote use requires explicit opt-in and HTTPS. |
-| `--provider auto\|groq\|ollama` | `repo-guide` | Choose provider; auto selects Groq only when key is set. |
+| `GEMINI_API_KEY` | `repo-guide` | Presence selects Gemini in auto mode when Groq is not selected; process environment only. |
+| `GEMINI_MODEL` | `repo-guide` | Gemini model ID; default `gemini-3.8-flash`. |
+| `--provider auto\|gemini\|groq\|ollama` | `repo-guide` | Choose provider; auto prefers Groq, then Gemini, then Ollama. |
 | `--model MODEL` | `repo-guide` | Override selected provider model. |
-| `--max-steps N` | `repo-guide` | Maximum model decisions; default four, maximum 32. More steps may consume more requests. |
+| `--max-steps N` | `repo-guide` | Maximum model decisions; default two, maximum 32. More steps may consume more requests. |
 | `--verbose` | Both commands | Non-sensitive stderr diagnostics/tool names; it does not authorize secrets to be logged. |
+| `--no-verify` | `repo-guide` | Skip final citation/provenance checks and reflection; prints unchecked model answer with a warning. Verification remains on by default. |
 
 ## Limits, failure modes, and edge cases
 
