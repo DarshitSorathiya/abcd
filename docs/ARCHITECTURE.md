@@ -6,8 +6,9 @@
 - Merge: both register under same root context; custom can call built tools
 
 ## Fallback
-- Try model in order: qwen3:8b → mistral:7b → llama3 → any available
-- If none available: reply with error, do not crash
+- Use local Ollama (`qwen3:8b`) when `GROQ_API_KEY` is absent.
+- When `GROQ_API_KEY` is set, use Groq's fixed HTTPS chat endpoint and `GROQ_MODEL` (default `qwen/qwen3.8-27b`); do not silently fall back after a Groq request fails.
+- Report the selected provider and model at CLI startup and disclose that Groq receives the question and repository excerpts.
 
 ## Safety
 - All agent loops wrapped in try/except

@@ -7,8 +7,6 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from repo_guide.config import AgentSettings  # Retained for backward compat; not required by new init
-
 
 @dataclass(frozen=True, slots=True)
 class Observation:
@@ -63,7 +61,10 @@ class EvidenceLedger:
         truncated = len(serialized) > max_observation_chars
         if truncated:
             marker = "…[observation truncated]"
-            serialized = serialized[: max(0, max_observation_chars - len(marker))] + marker
+            serialized = (
+                serialized[: max(0, max_observation_chars - len(marker))]
+                + marker[:max_observation_chars]
+            )
         digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
         if digest not in self._fingerprints:
             self._generation += 1

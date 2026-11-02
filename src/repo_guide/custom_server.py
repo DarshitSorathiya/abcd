@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 """Built + custom MCP: repo-guide-mcp with extension layer for memory, cache, fallback."""
+import os
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -7,7 +8,8 @@ from repo_guide.root import resolve_root
 from repo_guide.server import build_server
 from repo_guide.config import AgentSettings
 from repo_guide.memory_cache import Memory, Cache, fallback_model
-from repo_guide.ollama_client import OllamaClient
+from repo_guide.groq_client import GroqClient
+from repo_guide.ollama_client import ChatClient, OllamaClient
 from repo_guide.verify import verify_and_reflect
 from repo_guide.agent import _run_turn_with_server
 
@@ -19,7 +21,10 @@ def main():
         ollama_base_url="http://127.0.0.1:11434",
         max_steps=8,
     )
-    ollama = OllamaClient(settings)
+    groq_api_key = os.environ.get("GROQ_API_KEY", "").strip()
+    ollama: ChatClient = (
+        GroqClient(settings, groq_api_key) if groq_api_key else OllamaClient(settings)
+    )
     while True:
         question = input("Question> ")
         if not question.strip(): break

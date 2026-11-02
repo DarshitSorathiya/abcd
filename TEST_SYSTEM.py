@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""End-to-end system test: verify Groq primary + Ollama fallback + MCP tools work."""
+"""End-to-end system test: verify local Ollama model selection + MCP tools work."""
 import asyncio
 import sys
 import os
@@ -15,22 +15,20 @@ async def main():
     print("REPO GUIDE - END-TO-END SYSTEM TEST")
     print("=" * 70)
 
-    # 1. Test keys.env loading
-    print("\n[1] Testing API Key Loading...")
+    # 1. Test local model selection
+    from repo_guide.config import DEFAULT_GROQ_MODEL, DEFAULT_OLLAMA_MODEL
     from repo_guide.memory_cache import fallback_model
-    groq_key = os.environ.get("GROQ_API_KEY")
-    if groq_key:
-        print(f"  [OK] GROQ_API_KEY loaded: {groq_key[:20]}...")
-    else:
-        print("  [FAIL] GROQ_API_KEY not found")
-
-    # 2. Test Groq fallback model detection
-    print("\n[2] Testing Groq Model Detection...")
     model = fallback_model()
-    print(f"  [OK] Detected model: {model}")
+    expected_model = (
+        DEFAULT_GROQ_MODEL if os.environ.get("GROQ_API_KEY", "").strip() else DEFAULT_OLLAMA_MODEL
+    )
+    if model != expected_model:
+        print(f"  [FAIL] Expected model {expected_model}, got {model}")
+        return False
+    print(f"  [OK] Selected model: {model}")
 
-    # 3. Test SQLite memory/cache
-    print("\n[3] Testing SQLite Memory & Cache...")
+    # 2. Test SQLite memory/cache
+    print("\n[2] Testing SQLite Memory & Cache...")
     from repo_guide.memory_cache import Memory, Cache
     mem = Memory()
     mem.set("test_key", "test_value")
@@ -45,21 +43,21 @@ async def main():
     ratio = cache.ratio()
     print(f"  [OK] Cache: hit ratio = {ratio:.1%} (2 hits, 1 miss)")
 
-    # 4. Test root resolution
-    print("\n[4] Testing Repository Root Resolution...")
+    # 3. Test root resolution
+    print("\n[3] Testing Repository Root Resolution...")
     from repo_guide.root import resolve_root, RootMode
     repo_root = resolve_root(str(Path(__file__).parent), allow_non_git=False)
     print(f"  [OK] Repo root: {repo_root.path}")
     print(f"  [OK] Mode: {repo_root.mode.value}")
 
-    # 5. Test MCP server can start
-    print("\n[5] Testing MCP Server Startup...")
+    # 4. Test MCP server can start
+    print("\n[4] Testing MCP Server Startup...")
     from repo_guide.agent import build_server_parameters
     params = build_server_parameters(repo_root)
     print(f"  [OK] Server parameters built")
 
-    # 6. Test tool discovery
-    print("\n[6] Testing Tool Catalogue Discovery...")
+    # 5. Test tool discovery
+    print("\n[5] Testing Tool Catalogue Discovery...")
     from mcp import Client
     try:
         async with Client(params) as client:
@@ -72,8 +70,8 @@ async def main():
         print(f"  [FAIL] Tool discovery failed: {e}")
         return False
 
-    # 7. Test gitops basic functionality
-    print("\n[7] Testing Git Operations...")
+    # 6. Test gitops basic functionality
+    print("\n[6] Testing Git Operations...")
     from repo_guide import gitops
     try:
         log_result = gitops.git_log(repo_root)

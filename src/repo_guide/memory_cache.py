@@ -1,16 +1,11 @@
-"""Memory, cache, and /goal loop using SQLite + Groq fallbacks."""
+"""SQLite-backed memory, cache, and /goal loop helpers."""
 from __future__ import annotations
-import sqlite3, os, time, requests
+
+import os
+import sqlite3
 from pathlib import Path
 
-# Load API keys from keys.env if it exists
-_keys_file = Path(__file__).parent / "keys.env"
-if _keys_file.exists():
-    for line in _keys_file.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, val = line.split("=", 1)
-            os.environ.setdefault(key.strip(), val.strip())
+from repo_guide.config import DEFAULT_GROQ_MODEL, DEFAULT_OLLAMA_MODEL
 
 DB = Path.home() / ".repo_guide" / "agent.db"
 DB.parent.mkdir(parents=True, exist_ok=True)
@@ -56,23 +51,12 @@ class Cache:
         total = hits + misses
         return hits / total if total > 0 else 0.0
 
-def fallback_model():
-    """Try Groq API first, then fall back to local Ollama."""
-    try:
-        key = os.environ.get("GROQ_API_KEY")
-        if not key:
-            return "qwen3:8b"
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json={"model":"qwen/qwen3.8-27b","messages":[{"role":"user","content":"hi"}],"max_tokens":5},
-            timeout=5
-        )
-        if resp.status_code == 200:
-            return "groq"
-    except Exception:
-        pass
-    return "qwen3:8b"
+def fallback_model() -> str:
+    """Select the configured model for the active provider."""
+    if os.environ.get("GROQ_API_KEY", "").strip():
+        return os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL)
+    return os.environ.get("REPO_GUIDE_MODEL", DEFAULT_OLLAMA_MODEL)
+
 
 def run_until_goal(context, ollama, settings, question, goal_string="final"):
     memory = Memory(); cache = Cache()

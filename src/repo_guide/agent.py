@@ -1,4 +1,4 @@
-"""CLI agent loop that uses Ollama decisions and a discovered read-only MCP server."""
+"""CLI agent loop using a chat provider and a discovered read-only MCP server."""
 
 from __future__ import annotations
 
@@ -15,10 +15,16 @@ from jsonschema.validators import validator_for
 from mcp import Client, StdioServerParameters
 
 from repo_guide import __version__
-from repo_guide.config import DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_MODEL, AgentSettings
+from repo_guide.config import (
+    DEFAULT_GROQ_MODEL,
+    DEFAULT_OLLAMA_BASE_URL,
+    DEFAULT_OLLAMA_MODEL,
+    AgentSettings,
+)
 from repo_guide.errors import AgentError, RepoGuideError
 from repo_guide.evidence import EvidenceLedger
-from repo_guide.ollama_client import OllamaClient
+from repo_guide.groq_client import GroqClient
+from repo_guide.ollama_client import ChatClient, OllamaClient
 from repo_guide.root import RootContext, RootMode, resolve_root
 from repo_guide.verify import VerificationReport, verify_and_reflect
 
@@ -93,7 +99,7 @@ async def discover_tools(client: Any, settings: AgentSettings) -> tuple[ToolDefi
 
 async def run_agent_turn(
     client: Any,
-    ollama: OllamaClient,
+    chat_client: ChatClient,
     question: str,
     *,
     settings: AgentSettings,
@@ -122,7 +128,7 @@ async def run_agent_turn(
 
     for step in range(1, settings.max_steps + 1):
         user_prompt = _make_user_prompt(original_question, catalogue_text, ledger, settings)
-        action = await _request_action(ollama, system_message, user_prompt, settings)
+        action = await _request_action(chat_client, system_message, user_prompt, settings)
         if action.action == "final":
             answer = (action.answer or "").strip()
             if not answer:
@@ -197,7 +203,13 @@ async def run_agent_turn(
             )
         else:
             payload = _tool_result_payload(result, settings.max_observation_chars)
-            ledger.record(tool.name, arguments, payload, is_error=bool(getattr(result, "is_error", False)))
+            ledger.record(
+                tool.name,
+                arguments,
+                payload,
+                is_error=bool(getattr(result, "is_error", False)),
+                max_observation_chars=settings.max_observation_chars,
+            )
 
     return _step_limit_result(ledger, settings.max_steps)
 
@@ -247,13 +259,13 @@ def _parse_action(content: str) -> _Action:
 
 
 async def _request_action(
-    ollama: OllamaClient,
+    chat_client: ChatClient,
     system_message: dict[str, str],
     user_prompt: str,
     settings: AgentSettings,
 ) -> _Action:
     messages = [system_message, {"role": "user", "content": user_prompt}]
-    response = await asyncio.to_thread(ollama.chat, messages)
+    response = await asyncio.to_thread(chat_client.chat, messages)
     try:
         return _parse_action(response)
     except AgentError as first_error:
@@ -262,7 +274,7 @@ async def _request_action(
             "Return exactly one valid JSON object in the required action schema. Do not include prose."
         )
     repaired = await asyncio.to_thread(
-        ollama.chat,
+        chat_client.chat,
         [system_message, {"role": "user", "content": user_prompt}, {"role": "user", "content": repair}],
     )
     try:
@@ -271,7 +283,7 @@ async def _request_action(
         short_retry = "Return one strict JSON action object only: a known tool with args, or final with answer."
     try:
         retried = await asyncio.to_thread(
-            ollama.chat,
+            chat_client.chat,
             [system_message, {"role": "user", "content": user_prompt[: settings.max_context_chars // 2]},
              {"role": "user", "content": short_retry}],
         )
@@ -394,20 +406,22 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 async def _run_turn_with_server(
     context: RootContext,
-    ollama: OllamaClient,
+    chat_client: ChatClient,
     question: str,
     settings: AgentSettings,
 ) -> AgentTurnResult:
     parameters = build_server_parameters(context)
     async with Client(parameters) as client:
         catalogue = await discover_tools(client, settings)
-        candidate = await run_agent_turn(client, ollama, question, settings=settings, tools=catalogue)
+        candidate = await run_agent_turn(
+            client, chat_client, question, settings=settings, tools=catalogue
+        )
         report = await verify_and_reflect(
             context,
             question,
             candidate.answer,
             candidate.evidence,
-            ollama,
+            chat_client,
             settings,
         )
         return AgentTurnResult(
@@ -421,16 +435,16 @@ async def _run_turn_with_server(
 
 async def run_question(
     context: RootContext,
-    ollama: OllamaClient,
+    chat_client: ChatClient,
     question: str,
     settings: AgentSettings,
 ) -> AgentTurnResult:
-    """Run one complete root-bound MCP/Ollama/verification turn.
+    """Run one complete root-bound MCP/model-provider/verification turn.
 
     This public entry is shared by the interactive CLI and the deterministic
     evaluation runner; it does not create a second tool or agent loop.
     """
-    return await _run_turn_with_server(context, ollama, question, settings)
+    return await _run_turn_with_server(context, chat_client, question, settings)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -438,7 +452,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Ask bounded questions about one local repository.")
     parser.add_argument("--repo", help="repository path; overrides REPO_GUIDE_ROOT and cwd")
     parser.add_argument("--allow-non-git", action="store_true", help="enable reduced filesystem-only mode")
-    parser.add_argument("--model", help="Ollama model (default from REPO_GUIDE_MODEL or central config)")
+    parser.add_argument(
+        "--provider",
+        choices=("auto", "groq", "ollama"),
+        default="auto",
+        help="model provider (auto selects Groq when GROQ_API_KEY is set; default: auto)",
+    )
+    parser.add_argument("--model", help="model ID for the selected provider")
     parser.add_argument("--ollama-url", help="Ollama origin (default from OLLAMA_BASE_URL or central config)")
     parser.add_argument("--allow-remote-ollama", action="store_true", help="explicitly permit HTTPS remote model endpoint")
     parser.add_argument("--max-steps", type=int, default=8, help="maximum model decisions per question (1–32)")
@@ -449,26 +469,52 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         context = resolve_root(args.repo, allow_non_git=args.allow_non_git)
+        groq_api_key = os.environ.get("GROQ_API_KEY", "").strip()
+        provider = args.provider
+        if provider == "auto":
+            provider = "groq" if groq_api_key else "ollama"
+        if provider == "groq" and not groq_api_key:
+            raise AgentError(
+                "groq_api_key_missing",
+                "Groq was selected but GROQ_API_KEY is not set in this process environment",
+            )
+        default_model = (
+            os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL)
+            if provider == "groq"
+            else os.environ.get("REPO_GUIDE_MODEL", DEFAULT_OLLAMA_MODEL)
+        )
         settings = AgentSettings(
-            model=args.model or os.environ.get("REPO_GUIDE_MODEL", DEFAULT_OLLAMA_MODEL),
-            ollama_base_url=args.ollama_url or os.environ.get("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL),
+            model=args.model or default_model,
+            ollama_base_url=(
+                args.ollama_url
+                or os.environ.get("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
+            ),
             allow_remote_ollama=args.allow_remote_ollama,
             max_steps=args.max_steps,
         )
-        ollama = OllamaClient(settings)
+        chat_client: ChatClient = (
+            GroqClient(settings, groq_api_key) if provider == "groq" else OllamaClient(settings)
+        )
     except RepoGuideError as exc:
         print(f"repo-guide: {exc.message}", file=sys.stderr)
         return 2
     except Exception:
-        print("repo-guide: unable to configure the repository or Ollama endpoint safely", file=sys.stderr)
+        print("repo-guide: unable to configure the repository or model provider safely", file=sys.stderr)
         return 2
 
     print(
-        f"repo-guide root={context.path} mode={context.mode.value} model={settings.model}",
+        f"repo-guide root={context.path} mode={context.mode.value} "
+        f"provider={provider} model={settings.model}",
         file=sys.stderr,
         flush=True,
     )
-    if args.allow_remote_ollama:
+    if provider == "groq":
+        print(
+            "repo-guide: Groq receives the question and repository excerpts used for this answer",
+            file=sys.stderr,
+            flush=True,
+        )
+    if args.allow_remote_ollama and provider == "ollama":
         print("repo-guide: remote Ollama endpoint explicitly enabled", file=sys.stderr, flush=True)
 
     exit_code = 0
@@ -486,7 +532,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print("Enter a non-empty question.", file=sys.stderr)
                 continue
             try:
-                result = asyncio.run(_run_turn_with_server(context, ollama, question, settings))
+                result = asyncio.run(_run_turn_with_server(context, chat_client, question, settings))
             except KeyboardInterrupt:
                 print("", file=sys.stderr)
                 break
@@ -500,7 +546,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 break
             print(result.answer, file=sys.stdout, flush=True)
     finally:
-        ollama.close()
+        chat_client.close()
     return exit_code
 
 

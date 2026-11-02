@@ -4,14 +4,14 @@
 
 ## 1. Product
 
-Repo Guide is a local CLI agent that helps a contributor understand a small unfamiliar codebase. It answers retrieval-oriented questions such as “Where is authentication handled?”, “What changed in the last two weeks?”, “Which open issues are good first issues?”, and “Create an onboarding guide.” It selects tools step by step, gathers evidence through MCP, and verifies repository citations in code before replying. The LLM runs locally through Ollama.
+Repo Guide is a local CLI agent that helps a contributor understand a small unfamiliar codebase. It answers retrieval-oriented questions such as “Where is authentication handled?”, “What changed in the last two weeks?”, “Which open issues are good first issues?”, and “Create an onboarding guide.” It selects tools step by step, gathers evidence through MCP, and verifies repository citations in code before replying. The CLI uses local Ollama by default; setting `GROQ_API_KEY` explicitly opts into Groq's hosted chat API.
 
 **Scope statement (must appear in README and demo):** This is a local, read-only repository onboarding assistant. It searches text rather than semantic meaning, reads code but never runs it, and does not replace code review or maintainers. Production-minded controls do not mean the current prototype is certified for production use.
 
 ## 2. Clients and process boundaries
 
 1. `repo-guide-mcp`: one read-only MCP server process serving exactly one root.
-2. `repo-guide`: CLI client that connects to that server, uses Ollama to choose tools, loops until final, and verifies citations.
+2. `repo-guide`: CLI client that connects to that server, uses Ollama by default or Groq when `GROQ_API_KEY` is set to choose tools, loops until final, and verifies citations.
 3. IDE client: VS Code Copilot Chat or another MCP client launches the same server independently. The IDE's own model calls tools. It does **not** host or invoke the Ollama CLI agent. MCP Inspector is the protocol/debug client.
 
 The proof of MCP reuse is two clients using the same unchanged server implementation. Tools are the compatibility baseline; prompts/resources are additive and clients may support them differently.
@@ -82,8 +82,9 @@ Citation existence is not proof that a claim is semantically supported. Maintain
 
 ## 9. LLM and HTTP behavior
 
-- Ollama runs locally; model name is configurable, never embedded across code. Set bounded request timeouts and response-size limits. Check process/model availability only when a CLI answer is requested, not when the MCP server starts.
-- Default Ollama endpoint should be loopback. A remote endpoint requires an explicit opt-in setting and warning; never silently send repository contents to a remote model.
+- Ollama runs locally by default; model name is configurable, never embedded across code. Set bounded request timeouts and response-size limits. Check process/model availability only when a CLI answer is requested, not when the MCP server starts.
+- Setting `GROQ_API_KEY` opts the CLI into the fixed Groq HTTPS chat endpoint; `GROQ_MODEL` selects its model, defaulting to `qwen/qwen3.8-27b`. Announce this provider and warn that the question and repository excerpts are sent to Groq. Read credentials only from the process environment; never probe the service at startup.
+- Default Ollama endpoint should be loopback. A remote Ollama endpoint requires an explicit opt-in setting and warning; never silently send repository contents to a remote model.
 - GitHub REST requests are unauthenticated and public-only. Set a descriptive User-Agent, connect/read timeout (20 seconds maximum), bounded response size, safe retry/backoff for transient errors and 429/5xx, respect `Retry-After` and rate-limit headers, and stop retrying when the API reports quota exhaustion. Avoid repeated identical requests; cache only if implemented with a bounded TTL and outside the repository.
 - Never make a network request during MCP server initialization. Do not add telemetry.
 

@@ -16,7 +16,7 @@ This pack gives GitHub Copilot the project contract, architecture, security mode
 
 ## Product in one paragraph
 
-Repo Guide is a local, read-only repository onboarding agent. It uses a Python MCP server to expose bounded tools for repository tree/file/search/history and public GitHub issues; a separate CLI agent uses a local Ollama model to choose tools, observe results, and stop when it has evidence. Final repository claims cite repository-relative `path:line` locations or commit hashes. Programmatic verification rejects invalid citations before output. MCP clients such as VS Code Copilot Chat and MCP Inspector can launch the same server independently; they use their own model. The Ollama CLI agent does not run inside Copilot Chat.
+Repo Guide is a local, read-only repository onboarding agent. It uses a Python MCP server to expose bounded tools for repository tree/file/search/history and public GitHub issues; a separate CLI agent uses local Ollama by default, or Groq's hosted chat API when `GROQ_API_KEY` is set, to choose tools, observe results, and stop when it has evidence. Final repository claims cite repository-relative `path:line` locations or commit hashes. Programmatic verification rejects invalid citations before output. MCP clients such as VS Code Copilot Chat and MCP Inspector can launch the same server independently; they use their own model. The CLI agent does not run inside Copilot Chat.
 
 ## Current protocol note (verified 21 Oct 2026)
 
@@ -43,13 +43,17 @@ If the command is not found, check that the environment's script directory is on
 
 Packaging and CLI smoke tests were run on Linux with Python 3.12. Windows and macOS are supported targets but have not been tested in this workspace.
 
+## CLI model provider
+
+Without `GROQ_API_KEY`, `repo-guide` uses local Ollama (`qwen3:8b` by default). Set `GROQ_API_KEY` in the process environment and run `repo-guide --provider groq --repo .` to explicitly use Groq; `--provider auto` selects Groq when a key is set, and `--provider ollama` forces local Ollama. If Groq is explicitly requested without a key, the CLI reports the missing setting instead of silently using Ollama. `GROQ_MODEL` optionally selects a Groq model (default `qwen/qwen3.8-27b`), while `--model` overrides the model ID for the selected provider. Startup reports the provider and model. Groq receives the question and repository excerpts used to answer it; use this only when that disclosure is acceptable. Credentials are read from the environment, not a repository key file.
+
 ## IDE MCP clients
 
 For VS Code, copy [examples/vscode.mcp.json](examples/vscode.mcp.json) to `.vscode/mcp.json` at the workspace root. It uses the VS Code `servers` format and `${workspaceFolder}` and passes that path explicitly to `repo-guide-mcp`.
 
 For Cursor, copy [examples/cursor.mcp.json](examples/cursor.mcp.json) to `.cursor/mcp.json`. Cursor's project format uses `mcpServers`; it supports `${workspaceFolder}` interpolation in command arguments. For the portable Copilot format, use [examples/portable.mcp.json](examples/portable.mcp.json) as `.mcp.json` and replace the absolute repository path. Portable configuration does not share VS Code's workspace-variable mechanism; do not assume an unspecified current directory points at the intended repository.
 
-Both IDEs use their own model to call this read-only MCP server. They do not run the Ollama-powered `repo-guide` CLI agent. Review workspace MCP configuration before trusting it: the client starts a local process with the user's permissions. Setup, executable path fallback, root verification, Inspector use, and client capability caveats are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+Both IDEs use their own model to call this read-only MCP server. They do not run the `repo-guide` CLI agent. Review workspace MCP configuration before trusting it: the client starts a local process with the user's permissions. Setup, executable path fallback, root verification, Inspector use, and client capability caveats are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## Evaluation and release status
 

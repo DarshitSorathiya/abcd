@@ -6,8 +6,8 @@ Security requirements are release blockers. The server may inspect untrusted rep
 
 - **Trusted code/config:** packaged Repo Guide code and explicit launch arguments.
 - **Untrusted data:** file contents, filenames, symlink targets, Git metadata, branches, commit messages, remote URLs, GitHub issue titles/labels, LLM outputs, model responses and client-supplied tool arguments.
-- **External service:** public GitHub API. It may be unavailable, rate limited, malformed, slow, or return hostile text.
-- **Local model:** output is untrusted and must be schema-validated; a local model is not a security boundary.
+- **External services:** public GitHub API and, when `GROQ_API_KEY` is explicitly set, Groq's hosted chat API. Treat their responses as untrusted; Groq receives the user's question and repository excerpts included in model prompts.
+- **Model:** output is untrusted and must be schema-validated; a local or hosted model is not a security boundary.
 
 ## Mandatory controls
 
@@ -39,6 +39,12 @@ Deny `.git/**`, `.env*`, private/public key files where likely credentials are s
 - Set User-Agent, connect/read timeout ≤20 seconds, response-size caps and retry budget. Retry only transient, idempotent GET failures; honor `Retry-After` and rate headers; do not retry quota exhaustion endlessly.
 - Parse and validate response shape. Filter pull requests out of issues. Do not return full issue bodies by default. Treat title, labels and URLs as untrusted text.
 - Avoid SSRF: the API host is constant, not derived from a user-supplied URL. Network access is deferred until the issue tool is called.
+
+### Groq chat API
+
+- Use only the fixed HTTPS Groq chat-completions endpoint with redirects disabled, certificate verification enabled, bounded request/response sizes, and explicit connect/read timeouts.
+- The hosted provider is opt-in only: select it only when `GROQ_API_KEY` is set in the process environment. Never read credentials from repository files, log them, include them in prompts, or probe Groq during startup.
+- Tell the user at startup that prompts and retrieved repository excerpts are sent to Groq. Do not silently fall back to a hosted provider when no key is configured.
 
 ### Prompt injection and LLM outputs
 

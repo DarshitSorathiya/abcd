@@ -1,4 +1,4 @@
-"""Mocked Ollama, MCP loop, and CLI tests for milestone M5."""
+"""Mocked model clients, MCP loop, and CLI tests for milestone M5."""
 
 from __future__ import annotations
 
@@ -16,9 +16,10 @@ import requests
 
 import repo_guide.agent as agent_module
 import repo_guide.ollama_client as ollama_module
-from repo_guide.config import AgentSettings
+from repo_guide.config import DEFAULT_GROQ_MODEL, AgentSettings
 from repo_guide.errors import AgentError
 from repo_guide.evidence import EvidenceLedger
+from repo_guide.groq_client import GroqClient
 from repo_guide.ollama_client import OllamaClient
 from repo_guide.root import RootContext, RootMode, resolve_root
 
@@ -156,6 +157,42 @@ def test_ollama_client_posts_non_streaming_json_to_local_api() -> None:
     assert session.closed is False
 
 
+def test_groq_client_posts_bounded_json_chat_to_hosted_api() -> None:
+    session = FakeHttpSession(
+        [FakeResponse({"choices": [{"message": {"content": '{"action":"final","answer":"ok"}'}}]})]
+    )
+    settings = fake_settings(model=DEFAULT_GROQ_MODEL)
+    client = GroqClient(settings, "test-api-key", session=session)
+
+    content = client.chat([{"role": "system", "content": "safe"}])
+
+    url, request = session.calls[0]
+    assert url == "https://api.groq.com/openai/v1/chat/completions"
+    assert content == '{"action":"final","answer":"ok"}'
+    assert request["json"]["model"] == DEFAULT_GROQ_MODEL
+    assert request["json"]["response_format"] == {"type": "json_object"}
+    assert request["json"]["max_completion_tokens"] == settings.max_output_tokens
+    assert request["headers"]["Authorization"] == "Bearer test-api-key"
+    assert request["timeout"] == (5.0, 120.0)
+    assert request["allow_redirects"] is False
+    assert request["verify"] is True
+    client.close()
+    assert session.closed is False
+
+
+def test_groq_client_sanitizes_http_errors_and_closes_response() -> None:
+    response_obj = FakeResponse(status=401, raw=b"private credential detail")
+    client = GroqClient(fake_settings(), "test-api-key", session=FakeHttpSession([response_obj]))
+
+    with pytest.raises(AgentError) as error:
+        client.chat([{"role": "user", "content": "question"}])
+
+    assert error.value.code == "groq_http_error"
+    assert "private" not in str(error.value)
+    assert "credential" not in str(error.value)
+    assert response_obj.closed
+
+
 @pytest.mark.parametrize(
     ("response_obj", "code"),
     [
@@ -245,9 +282,20 @@ def test_ollama_client_enforces_request_size_before_http() -> None:
 
 
 def test_evidence_context_keeps_errors_explicit_and_bounds_observations() -> None:
-    ledger = EvidenceLedger(fake_settings(max_observation_chars=128))
-    ledger.record("read_file", {"path": "README.md"}, {"error": "sensitive_path"}, is_error=True)
-    ledger.record("read_file", {"path": "README.md"}, {"text": "x" * 1_000})
+    ledger = EvidenceLedger(max_errors=16)
+    ledger.record(
+        "read_file",
+        {"path": "README.md"},
+        {"error": "sensitive_path"},
+        is_error=True,
+        max_observation_chars=128,
+    )
+    ledger.record(
+        "read_file",
+        {"path": "README.md"},
+        {"text": "x" * 1_000},
+        max_observation_chars=128,
+    )
 
     context = ledger.context_text(512)
 
@@ -593,6 +641,7 @@ def test_cli_interactive_empty_input_eof_stdout_and_stderr_separation(
 ) -> None:
     context = RootContext(tmp_path.resolve(), RootMode.REDUCED)
     fake_ollama = FakeOllama([])
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.setattr(agent_module, "resolve_root", lambda *args, **kwargs: context)
     monkeypatch.setattr(agent_module, "OllamaClient", lambda settings: fake_ollama)
     monkeypatch.setattr(agent_module.sys, "stdin", io.StringIO("\nfirst question\nsecond question\n"))
@@ -624,12 +673,63 @@ def test_cli_interactive_empty_input_eof_stdout_and_stderr_separation(
 def test_cli_handles_eof_and_ctrl_c_cleanly(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     context = RootContext(tmp_path.resolve(), RootMode.REDUCED)
     fake_ollama = FakeOllama([])
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.setattr(agent_module, "resolve_root", lambda *args, **kwargs: context)
     monkeypatch.setattr(agent_module, "OllamaClient", lambda settings: fake_ollama)
     monkeypatch.setattr(agent_module.sys, "stdin", io.StringIO(""))
 
     assert agent_module.main(["--allow-non-git"]) == 0
     assert fake_ollama.closed
+
+
+def test_cli_selects_groq_with_api_key_and_reports_remote_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    context = RootContext(tmp_path.resolve(), RootMode.REDUCED)
+    fake_groq = FakeOllama([])
+    secret = "test-only-api-key"
+    monkeypatch.setenv("GROQ_API_KEY", secret)
+    monkeypatch.delenv("GROQ_MODEL", raising=False)
+    monkeypatch.setattr(agent_module, "resolve_root", lambda *args, **kwargs: context)
+    monkeypatch.setattr(agent_module.sys, "stdin", io.StringIO(""))
+    selected: list[tuple[str, str]] = []
+
+    def create_groq(settings: AgentSettings, api_key: str) -> FakeOllama:
+        selected.append((settings.model, api_key))
+        return fake_groq
+
+    monkeypatch.setattr(agent_module, "GroqClient", create_groq)
+
+    assert agent_module.main(["--allow-non-git", "--provider", "groq"]) == 0
+
+    captured = capsys.readouterr()
+    assert selected == [(DEFAULT_GROQ_MODEL, secret)]
+    assert "provider=groq" in captured.err
+    assert f"model={DEFAULT_GROQ_MODEL}" in captured.err
+    assert "Groq receives the question and repository excerpts" in captured.err
+    assert secret not in captured.err
+    assert fake_groq.closed
+
+
+def test_cli_requires_key_when_groq_is_explicitly_selected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setattr(
+        agent_module,
+        "resolve_root",
+        lambda *args, **kwargs: RootContext(tmp_path.resolve(), RootMode.REDUCED),
+    )
+
+    assert agent_module.main(["--allow-non-git", "--provider", "groq"]) == 2
+
+    captured = capsys.readouterr()
+    assert "GROQ_API_KEY is not set in this process environment" in captured.err
+    assert "provider=ollama" not in captured.err
 
 
 def test_child_mcp_context_closes_on_turn_exception(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

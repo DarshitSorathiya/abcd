@@ -29,6 +29,14 @@ class _Session(Protocol):
     def close(self) -> None: ...
 
 
+class ChatClient(Protocol):
+    """Shared chat interface used by local and hosted model providers."""
+
+    def chat(self, messages: list[dict[str, str]], *, temperature: float | None = None) -> str: ...
+
+    def close(self) -> None: ...
+
+
 class OllamaClient:
     """POST bounded chat requests to one validated Ollama endpoint.
 

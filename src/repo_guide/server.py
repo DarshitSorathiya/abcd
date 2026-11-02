@@ -193,26 +193,6 @@ def build_server(context: RootContext, *, verbose: bool = False) -> MCPServer:
         except RepoGuideError as exc:
             raise ToolError(json.dumps(exc.as_dict(), ensure_ascii=False, separators=(",", ":"))) from exc
 
-    @server.tool(
-        name="analyze_dependencies",
-        title="Analyze repository dependencies",
-        description=(
-            "Parse and aggregate dependencies from common dependency files. "
-            "Supports pyproject.toml, requirements.txt, and package.json. "
-            "Returns parsed dependencies with name, version, source file, and flags "
-            "for dev/optional status. Missing or unparseable files are skipped."
-        ),
-    )
-    def analyze_dependencies_tool() -> dict[str, Any]:
-        """Return aggregated dependency analysis from all supported files."""
-        try:
-            return tool_result(
-                "analyze_dependencies",
-                gitops.analyze_dependencies(context),
-            )
-        except RepoGuideError as exc:
-            raise tool_error(exc) from exc
-
     @server.resource(
         "repo://readme",
         name="repository_readme",

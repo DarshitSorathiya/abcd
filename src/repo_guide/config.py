@@ -8,11 +8,12 @@ from repo_guide.errors import ConfigurationError
 
 DEFAULT_OLLAMA_MODEL = "qwen3:8b"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+DEFAULT_GROQ_MODEL = "qwen/qwen3.8-27b"
 
 
 @dataclass(frozen=True, slots=True)
 class AgentSettings:
-    """Local agent limits and Ollama endpoint configuration."""
+    """Agent limits, model selection, and Ollama endpoint configuration."""
 
     model: str = DEFAULT_OLLAMA_MODEL
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
