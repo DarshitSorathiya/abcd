@@ -45,7 +45,20 @@ Packaging and CLI smoke tests were run on Linux with Python 3.12. Windows and ma
 
 ## CLI model provider
 
-Without `GROQ_API_KEY`, `repo-guide` uses local Ollama (`qwen3:8b` by default). Set `GROQ_API_KEY` in the process environment and run `repo-guide --provider groq --repo .` to explicitly use Groq; `--provider auto` selects Groq when a key is set, and `--provider ollama` forces local Ollama. If Groq is explicitly requested without a key, the CLI reports the missing setting instead of silently using Ollama. `GROQ_MODEL` optionally selects a Groq model (default `qwen/qwen3.8-27b`), while `--model` overrides the model ID for the selected provider. Startup reports the provider and model. Groq receives the question and repository excerpts used to answer it; use this only when that disclosure is acceptable. Credentials are read from the environment, not a repository key file.
+Without `GROQ_API_KEY`, `repo-guide` uses local Ollama (`qwen3:8b` by default). To use Groq from PowerShell, enter the key securely and set it in the **same PowerShell window** before starting the CLI:
+
+```powershell
+$secureKey = Read-Host "Groq API key" -AsSecureString
+$env:GROQ_API_KEY = [System.Net.NetworkCredential]::new("", $secureKey).Password
+try {
+    repo-guide --repo .
+} finally {
+    Remove-Item Env:GROQ_API_KEY -ErrorAction SilentlyContinue
+    Remove-Variable secureKey -ErrorAction SilentlyContinue
+}
+```
+
+The CLI automatically selects Groq when that process variable is set; startup should show `provider=groq`. Without the key it shows `provider=ollama`. `--provider groq` requires the key, `--provider ollama` forces local Ollama, and `--provider auto` uses the same automatic selection. `GROQ_MODEL` optionally selects a Groq model (default `qwen/qwen3.8-27b`), while `--model` overrides the model ID for the selected provider. Groq receives the question and repository excerpts used to answer it; use this only when that disclosure is acceptable. Credentials are read from the environment, not a repository key file. `repo-guide-mcp` is only the repository-tools server; launching it separately does not select the CLI chat provider.
 
 ## IDE MCP clients
 

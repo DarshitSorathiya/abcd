@@ -670,7 +670,11 @@ def test_cli_interactive_empty_input_eof_stdout_and_stderr_separation(
     assert fake_ollama.closed
 
 
-def test_cli_handles_eof_and_ctrl_c_cleanly(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_cli_handles_eof_and_ctrl_c_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     context = RootContext(tmp_path.resolve(), RootMode.REDUCED)
     fake_ollama = FakeOllama([])
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
@@ -679,10 +683,11 @@ def test_cli_handles_eof_and_ctrl_c_cleanly(monkeypatch: pytest.MonkeyPatch, tmp
     monkeypatch.setattr(agent_module.sys, "stdin", io.StringIO(""))
 
     assert agent_module.main(["--allow-non-git"]) == 0
+    assert "provider=ollama" in capsys.readouterr().err
     assert fake_ollama.closed
 
 
-def test_cli_selects_groq_with_api_key_and_reports_remote_provider(
+def test_cli_selects_groq_with_api_key_and_reports_provider(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -702,7 +707,7 @@ def test_cli_selects_groq_with_api_key_and_reports_remote_provider(
 
     monkeypatch.setattr(agent_module, "GroqClient", create_groq)
 
-    assert agent_module.main(["--allow-non-git", "--provider", "groq"]) == 0
+    assert agent_module.main(["--allow-non-git"]) == 0
 
     captured = capsys.readouterr()
     assert selected == [(DEFAULT_GROQ_MODEL, secret)]
